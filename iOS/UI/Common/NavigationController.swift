@@ -25,4 +25,17 @@ class NavigationController: UINavigationController {
             .default
         }
     }
+
+    // let the top view controller hide the bars and lock the orientation, which the reader does
+    override var childForStatusBarHidden: UIViewController? {
+        topViewController
+    }
+
+    override var childForHomeIndicatorAutoHidden: UIViewController? {
+        topViewController
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        topViewController?.supportedInterfaceOrientations ?? super.supportedInterfaceOrientations
+    }
 }

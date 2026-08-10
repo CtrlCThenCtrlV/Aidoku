@@ -46,6 +46,14 @@ class ReaderViewController: BaseObservingViewController {
     private var sessionStartDate: Date?
     private var sessionLastInteraction: Date?
 
+    private struct NavigationBarState {
+        let navigationBarHidden: Bool
+        let navigationBarAlpha: CGFloat
+        let toolbarHidden: Bool
+        let toolbarAlpha: CGFloat
+    }
+    private var navigationBarState: NavigationBarState?
+
     weak var reader: ReaderReaderDelegate?
 
     private lazy var activityIndicator = UIActivityIndicatorView(style: .medium)
@@ -122,40 +130,20 @@ class ReaderViewController: BaseObservingViewController {
             case .unknown: .none
         }
         super.init()
+        hidesBottomBarWhenPushed = true
     }
 
     override func configure() {
         node.backgroundColor = .systemBackground
-        navigationController?.navigationBar.prefersLargeTitles = false
+        navigationItem.largeTitleDisplayMode = .never
 
-        // navbar buttons
-        navigationItem.leftBarButtonItems = [
-            UIBarButtonItem(
-                barButtonSystemItem: .close,
-                target: self,
-                action: #selector(close)
-            ),
+        // navbar buttons (the left side is left to the system back button)
+        navigationItem.rightBarButtonItems = [
             UIBarButtonItem(
                 image: UIImage(systemName: "list.bullet"),
                 style: .plain,
                 target: self,
                 action: #selector(openChapterList)
-            )
-        ]
-        let moreButton = UIBarButtonItem(
-            image: UIImage(systemName: "safari"),
-            style: .plain,
-            target: self,
-            action: #selector(openWebView)
-        )
-        moreButton.isEnabled = chapter.url != nil
-        navigationItem.rightBarButtonItems = [
-            moreButton,
-            UIBarButtonItem(
-                image: UIImage(systemName: "textformat.size"),
-                style: .plain,
-                target: self,
-                action: #selector(openReaderSettings)
             )
         ]
 
@@ -164,9 +152,10 @@ class ReaderViewController: BaseObservingViewController {
         let toolbarAppearance = UIToolbarAppearance()
         navigationBarAppearance.configureWithDefaultBackground()
         toolbarAppearance.configureWithDefaultBackground()
-        navigationController?.navigationBar.standardAppearance = navigationBarAppearance
-        navigationController?.navigationBar.compactAppearance = navigationBarAppearance
-        navigationController?.navigationBar.scrollEdgeAppearance = navigationBarAppearance
+        // set on the navigation item rather than the bar, so the screen underneath keeps its own
+        navigationItem.standardAppearance = navigationBarAppearance
+        navigationItem.compactAppearance = navigationBarAppearance
+        navigationItem.scrollEdgeAppearance = navigationBarAppearance
         navigationController?.toolbar.standardAppearance = toolbarAppearance
         navigationController?.toolbar.compactAppearance = toolbarAppearance
         if #available(iOS 15.0, *) {
@@ -256,6 +245,11 @@ class ReaderViewController: BaseObservingViewController {
         addObserver(forName: "Reader.disableDoubleTap") { [weak self] notification in
             self?.fakeZoomTapGesture.isEnabled = !(notification.object as? Bool ?? UserDefaults.standard.bool(forKey: "Reader.disableDoubleTap"))
         }
+        addObserver(forName: .readerOrientation) { [weak self] _ in
+            if #available(iOS 16.0, *) {
+                self?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
+        }
         let reloadBlock: (Notification) -> Void = { [weak self] _ in
             guard let self else { return }
             self.reader?.setChapter(self.chapter, startPage: self.currentPage)
@@ -309,6 +303,21 @@ class ReaderViewController: BaseObservingViewController {
         }
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+
+        // the navigation bar and toolbar are shared with the rest of the app, so their state has
+        // to be put back the way it was when the reader is popped
+        if navigationBarState == nil, let navigationController {
+            navigationBarState = NavigationBarState(
+                navigationBarHidden: navigationController.isNavigationBarHidden,
+                navigationBarAlpha: navigationController.navigationBar.alpha,
+                toolbarHidden: navigationController.isToolbarHidden,
+                toolbarAlpha: navigationController.toolbar.alpha
+            )
+        }
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
 
@@ -316,7 +325,7 @@ class ReaderViewController: BaseObservingViewController {
         sessionStartDate = Date.now
         sessionLastInteraction = nil
 
-        if navigationController?.toolbar.alpha == 0 {
+        if statusBarHidden || navigationController?.toolbar.alpha == 0 {
             hideBars()
         }
 
@@ -330,6 +339,36 @@ class ReaderViewController: BaseObservingViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
+        restoreNavigationState(animated: animated)
+
+        // an interactive pop can still be cancelled, so don't touch stored data until it commits
+        if let coordinator = transitionCoordinator, coordinator.isInteractive {
+            coordinator.notifyWhenInteractionChanges { [weak self] context in
+                guard !context.isCancelled else { return }
+                self?.saveStateOnClose()
+            }
+        } else {
+            saveStateOnClose()
+        }
+    }
+
+    private func restoreNavigationState(animated: Bool) {
+        guard let navigationController, let state = navigationBarState else { return }
+        navigationBarState = nil
+
+        navigationController.navigationBar.isHidden = false
+        navigationController.navigationBar.alpha = state.navigationBarAlpha
+        navigationController.toolbar.isHidden = false
+        navigationController.toolbar.alpha = state.toolbarAlpha
+        if #available(iOS 26.0, *) {
+            (navigationController.value(forKey: "_floatingBarContainerView") as? UIView)?.alpha = 1
+        }
+        navigationController.setNavigationBarHidden(state.navigationBarHidden, animated: animated)
+        navigationController.setToolbarHidden(state.toolbarHidden, animated: animated)
+        navigationController.interactivePopGestureRecognizer?.isEnabled = true
+    }
+
+    private func saveStateOnClose() {
         if !chaptersToRemoveDownload.isEmpty {
             Task {
                 await DownloadManager.shared.delete(chapters: chaptersToRemoveDownload.map {
@@ -342,6 +381,15 @@ class ReaderViewController: BaseObservingViewController {
         guard currentPage >= 1 else { return }
         Task {
             await updateReadPosition()
+        }
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        switch UserDefaults.standard.string(forKey: "Reader.orientation") {
+            case "device": .all
+            case "portrait": .portrait
+            case "landscape": .landscape
+            default: .all
         }
     }
 
@@ -358,27 +406,10 @@ class ReaderViewController: BaseObservingViewController {
     }
 
     func disableSwipeGestures() {
-        let isVerticalReader = reader is ReaderWebtoonViewController || readingMode == .vertical
-
-        // the view with the target gesture recognizers changes based on if it was presented from uikit or swiftui
-        let gestureRecognizers = (parent?.view.gestureRecognizers ?? []) + (parent?.view.superview?.superview?.gestureRecognizers ?? [])
-
-        for recognizer in gestureRecognizers {
-            switch String(describing: type(of: recognizer)) {
-                case "_UIParallaxTransitionPanGestureRecognizer": // swipe edge gesture
-                    recognizer.isEnabled = isVerticalReader
-
-                case "_UIContentSwipeDismissGestureRecognizer": // swipe down gesture
-                    recognizer.isEnabled = !isVerticalReader
-                    recognizer.delegate = self // ensure gesture only activates on swipe down, not swipe right
-
-//                case "_UITransformGestureRecognizer": // pinch gesture
-//                    recognizer.isEnabled = true
-
-                default:
-                    break
-            }
-        }
+        // the interactive pop gesture starts at the left screen edge, which the paged reader
+        // needs for page turns
+        let isWebtoonReader = reader is ReaderWebtoonViewController
+        navigationController?.interactivePopGestureRecognizer?.isEnabled = isWebtoonReader
     }
 
     func updateReadPosition(
@@ -539,7 +570,7 @@ class ReaderViewController: BaseObservingViewController {
     }
 
     @objc func close() {
-        dismiss(animated: true)
+        navigationController?.popViewController(animated: true)
     }
 
     @objc func sliderMoved(_ sender: ReaderSliderView) {
@@ -1138,15 +1169,6 @@ extension ReaderViewController {
                 }
             }
         }
-    }
-}
-
-// MARK: - UIGestureRecognizerDelegate
-extension ReaderViewController: UIGestureRecognizerDelegate {
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
-        let velocity = pan.velocity(in: pan.view)
-        return velocity.y > velocity.x && (abs(velocity.x) < 40 || abs(velocity.y) > abs(velocity.x) * 3)
     }
 }
 

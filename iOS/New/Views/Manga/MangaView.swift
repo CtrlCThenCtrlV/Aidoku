@@ -229,22 +229,22 @@ struct MangaView: View {
                     }
                 }
             }
-            .fullScreenCover(item: $openChapter) { chapter in
-                SwiftUIReaderNavigationController(
-                    source: viewModel.source,
-                    manga: {
-                        var mangaWithFilteredChapters = viewModel.manga
-                        mangaWithFilteredChapters.chapters = if viewModel.chapterSortAscending {
-                            viewModel.chapters.reversed()
-                        } else {
-                            viewModel.chapters
-                        }
-                        return mangaWithFilteredChapters
-                    }(),
-                    chapter: chapter
+            .onChange(of: openChapter) { chapter in
+                guard let chapter else { return }
+                openChapter = nil
+                var mangaWithFilteredChapters = viewModel.manga
+                mangaWithFilteredChapters.chapters = if viewModel.chapterSortAscending {
+                    viewModel.chapters.reversed()
+                } else {
+                    viewModel.chapters
+                }
+                path.navigationController?.pushReader(
+                    ReaderViewController(
+                        source: viewModel.source,
+                        manga: mangaWithFilteredChapters,
+                        chapter: chapter
+                    )
                 )
-                .ignoresSafeArea()
-                .navigationTransitionZoom(sourceID: chapter, in: transitionNamespace)
             }
             .environment(\.editMode, $editMode)
         }

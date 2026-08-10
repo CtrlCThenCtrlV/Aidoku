@@ -149,7 +149,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
                 "History.lockHistoryTab": false,
 
-                "Reader.readingMode": "auto",
+                "Reader.readingMode": "webtoon",
                 "Reader.skipDuplicateChapters": true,
                 "Reader.markDuplicateChapters": true,
                 "Reader.downsampleImages": false,
@@ -173,7 +173,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 "Reader.pillarbox": false,
                 "Reader.pillarboxAmount": 15,
                 "Reader.pillarboxOrientation": "both",
-                "Reader.orientation": "device",
+                "Reader.orientation": "portrait",
 
                 // Text Reader defaults
                 "Reader.textReaderStyle": "scroll",

@@ -1359,29 +1359,7 @@ extension LibraryViewController {
                         manga: manga,
                         chapter: chapter
                     )
-                    let navigationController = ReaderNavigationController(
-                        readerViewController: readerController,
-                        mangaInfo: info
-                    )
-                    if #available(iOS 18.0, *) {
-                        navigationController.preferredTransition = .zoom { context in
-                            guard
-                                let navigationController = context.zoomedViewController as? ReaderNavigationController,
-                                let info = navigationController.mangaInfo,
-                                let indexPath = self.dataSource.indexPath(for: info),
-                                let cell = self.collectionView.cellForItem(at: indexPath)
-                            else {
-                                return nil
-                            }
-                            if let cell = cell as? MangaListCell {
-                                return cell.coverImageView
-                            } else {
-                                return cell.contentView
-                            }
-                        }
-                    }
-                    navigationController.modalPresentationStyle = .fullScreen
-                    present(navigationController, animated: true)
+                    navigationController?.pushReader(readerController)
                 } else {
                     // no chapter to read, open manga page
                     let indexPath = dataSource.indexPath(for: info) ?? indexPath // get new index path in case it changed

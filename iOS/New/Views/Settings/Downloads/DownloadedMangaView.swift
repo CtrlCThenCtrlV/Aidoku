@@ -80,14 +80,16 @@ struct DownloadedMangaView: View {
         } message: {
             Text(NSLocalizedString("REMOVE_ALL_DOWNLOADS_CONFIRM"))
         }
-        .fullScreenCover(item: $openChapter) { chapter in
-            SwiftUIReaderNavigationController(
-                source: SourceManager.shared.source(for: viewModel.manga.sourceId),
-                manga: viewModel.manga.toManga(),
-                chapter: chapter.toChapter()
+        .onChange(of: openChapter) { chapter in
+            guard let chapter else { return }
+            openChapter = nil
+            path.navigationController?.pushReader(
+                ReaderViewController(
+                    source: SourceManager.shared.source(for: viewModel.manga.sourceId),
+                    manga: viewModel.manga.toManga(),
+                    chapter: chapter.toChapter()
+                )
             )
-            .ignoresSafeArea()
-            .navigationTransitionZoom(sourceID: chapter, in: transitionNamespace)
         }
     }
 
