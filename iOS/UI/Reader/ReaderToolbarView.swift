@@ -81,8 +81,9 @@ class ReaderToolbarView: UIView {
 
             sliderView.heightAnchor.constraint(equalToConstant: 12),
             sliderView.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            sliderView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            sliderView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)
+            // inset far enough that the knob doesn't sit in the screen edge back gesture area
+            sliderView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            sliderView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20)
         ])
     }
 
