@@ -46,14 +46,6 @@ class ReaderViewController: BaseObservingViewController {
     private var sessionStartDate: Date?
     private var sessionLastInteraction: Date?
 
-    private struct NavigationBarState {
-        let navigationBarHidden: Bool
-        let navigationBarAlpha: CGFloat
-        let toolbarHidden: Bool
-        let toolbarAlpha: CGFloat
-    }
-    private var navigationBarState: NavigationBarState?
-    private let orientationLockId = UUID()
     private var hasAppeared = false
 
     weak var reader: ReaderReaderDelegate?
@@ -292,40 +284,21 @@ class ReaderViewController: BaseObservingViewController {
         }
         if #available(iOS 26.0, *) {
             addObserver(forName: UIScene.willEnterForegroundNotification) { [weak self] _ in
-                if self?.navigationController?.toolbar.alpha == 0 {
-                    self?.hideBars()
+                if self?.navigationController?.isToolbarHidden == true {
+                    self?.setBarsHidden(true, animated: false)
                 }
             }
         }
     }
 
-    /// Stores the state of the shared navigation bar and toolbar, so it can be put back when the
-    /// reader is popped. Has to be called before the reader is pushed, since it starts changing
-    /// that state as soon as its view loads.
-    func captureNavigationState(from navigationController: UINavigationController) {
-        navigationBarState = NavigationBarState(
-            navigationBarHidden: navigationController.isNavigationBarHidden,
-            navigationBarAlpha: navigationController.navigationBar.alpha,
-            toolbarHidden: navigationController.isToolbarHidden,
-            toolbarAlpha: navigationController.toolbar.alpha
-        )
-    }
-
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        InterfaceOrientationCoordinator.shared.register(orientations: .portrait, id: orientationLockId)
-
-        // the toolbar has to be enabled for the slider to be laid out, but it starts out
-        // invisible, since the reader opens with its bars hidden
-        navigationController?.isToolbarHidden = false
-        navigationController?.toolbar.alpha = 0
-
-        // open with the bars hidden. changing bar visibility here is folded into the push
-        // transition by uikit, so they slide away along with the screen underneath
+        // open with the bars hidden, without animating: an animated hide would still be running
+        // after a quick pop, and would then be changing bars that belong to the previous screen
         if !hasAppeared {
             hasAppeared = true
-            hideBars()
+            setBarsHidden(true, animated: false)
         }
     }
 
@@ -336,12 +309,9 @@ class ReaderViewController: BaseObservingViewController {
         sessionStartDate = Date.now
         sessionLastInteraction = nil
 
+        // an interactive pop that gets cancelled leaves the previous screen's bars behind
         if statusBarHidden {
-            hideBars()
-        } else {
-            // there's a bug on ios 15 where the toolbar just disappears when adding a child hosting controller
-            navigationController?.isToolbarHidden = false
-            navigationController?.toolbar.alpha = 1
+            setBarsHidden(true, animated: false)
         }
 
         disableSwipeGestures()
@@ -350,8 +320,7 @@ class ReaderViewController: BaseObservingViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
-        InterfaceOrientationCoordinator.shared.unregister(orientationsWithID: orientationLockId)
-        restoreNavigationState(animated: animated)
+        restoreSharedBars(animated: animated)
 
         // an interactive pop can still be cancelled, so don't touch stored data until it commits
         if let coordinator = transitionCoordinator, coordinator.isInteractive {
@@ -376,29 +345,12 @@ class ReaderViewController: BaseObservingViewController {
         }
     }
 
-    private func restoreNavigationState(animated: Bool) {
-        guard let navigationController, let state = navigationBarState else { return }
-
-        navigationController.navigationBar.isHidden = false
-        navigationController.setNavigationBarHidden(state.navigationBarHidden, animated: animated)
-        // the reader may have faded the bar out, so bring it back with the transition
-        UIView.animate(withDuration: animated ? CATransaction.animationDuration() : 0) {
-            navigationController.navigationBar.alpha = state.navigationBarAlpha
-        }
-
-        // when the reader's bars are hidden there's nothing to animate away, and restoring the
-        // toolbar's alpha mid transition would flash the slider back into view
-        navigationController.toolbar.isHidden = false
-        if statusBarHidden {
-            navigationController.setToolbarHidden(state.toolbarHidden, animated: false)
-            navigationController.toolbar.alpha = state.toolbarAlpha
-        } else {
-            navigationController.setToolbarHidden(state.toolbarHidden, animated: animated)
-        }
-
-        if #available(iOS 26.0, *) {
-            (navigationController.value(forKey: "_floatingBarContainerView") as? UIView)?.alpha = 1
-        }
+    /// The navigation bar and toolbar belong to the whole app, so the reader puts them back the
+    /// way every other screen expects them: bar shown, toolbar hidden.
+    private func restoreSharedBars(animated: Bool) {
+        guard let navigationController else { return }
+        navigationController.setNavigationBarHidden(false, animated: animated)
+        navigationController.setToolbarHidden(true, animated: animated)
         navigationController.interactivePopGestureRecognizer?.isEnabled = true
     }
 
@@ -999,7 +951,7 @@ extension ReaderViewController {
 
         if let type {
             // hide the bars when tapping regardless
-            if let navigationController, navigationController.navigationBar.alpha > 0 {
+            if !statusBarHidden {
                 hideBars()
             }
             // handle page moving
@@ -1102,97 +1054,51 @@ extension ReaderViewController {
     }
 
     func showBars() {
-        guard let navigationController else { return }
-
-        if #available(iOS 27.0, *) {
-            navigationController.navigationBar.isHidden = true
-            navigationController.isNavigationBarHidden = false
-        }
-
-        UIView.animate(withDuration: CATransaction.animationDuration()) {
-            self.statusBarHidden = false
-            self.setNeedsStatusBarAppearanceUpdate()
-            self.setNeedsUpdateOfHomeIndicatorAutoHidden()
-        } completion: { _ in
-            NotificationCenter.default.post(name: .readerShowingBars, object: nil)
-
-            UIView.setAnimationsEnabled(false)
-            if #available(iOS 26.0, *) {
-                if navigationController.isToolbarHidden {
-                    (navigationController.value(forKey: "_floatingBarContainerView") as? UIView)?.alpha = 0
-                    navigationController.isToolbarHidden = false
-                }
-            } else {
-                if navigationController.toolbar.isHidden {
-                    navigationController.toolbar.alpha = 0
-                    navigationController.toolbar.isHidden = false
-                }
-            }
-            self.pageDescriptionButtonBottomConstraint.constant = 0
-            navigationController.navigationBar.isHidden = false
-            UIView.setAnimationsEnabled(true)
-            UIView.animate(withDuration: CATransaction.animationDuration()) {
-                navigationController.navigationBar.alpha = 1
-                navigationController.toolbar.alpha = 1
-                if #available(iOS 26.0, *) {
-                    (navigationController.value(forKey: "_floatingBarContainerView") as? UIView)?.alpha = 1
-                }
-                self.node.backgroundColor = if UserDefaults.standard.bool(forKey: "General.useSystemAppearance") {
-                    .systemBackground
-                } else {
-                    if UserDefaults.standard.integer(forKey: "General.appearance") == 0 {
-                        .white
-                    } else {
-                        .black
-                    }
-                }
-                self.node.layoutIfNeeded()
-            }
-        }
+        setBarsHidden(false, animated: true)
     }
 
     func hideBars() {
+        setBarsHidden(true, animated: true)
+    }
+
+    /// Shows or hides every bar at once, letting the navigation controller animate its own.
+    func setBarsHidden(_ hidden: Bool, animated: Bool) {
         guard let navigationController else { return }
 
-        UIView.animate(withDuration: CATransaction.animationDuration()) {
-            self.statusBarHidden = true
+        statusBarHidden = hidden
+        NotificationCenter.default.post(name: hidden ? .readerHidingBars : .readerShowingBars, object: nil)
+
+        navigationController.setNavigationBarHidden(hidden, animated: animated)
+        navigationController.setToolbarHidden(hidden, animated: animated)
+
+        pageDescriptionButtonBottomConstraint.constant = hidden ? 30 : 0
+
+        let backgroundColor = readerBackgroundColor(barsHidden: hidden)
+        let animations = {
             self.setNeedsStatusBarAppearanceUpdate()
             self.setNeedsUpdateOfHomeIndicatorAutoHidden()
-        } completion: { _ in
-            NotificationCenter.default.post(name: .readerHidingBars, object: nil)
+            self.node.backgroundColor = backgroundColor
+            self.node.layoutIfNeeded()
+        }
+        if animated {
+            UIView.animate(withDuration: CATransaction.animationDuration(), animations: animations)
+        } else {
+            animations()
+        }
+    }
 
-            self.pageDescriptionButtonBottomConstraint.constant = 30
-
-            UIView.animate(withDuration: CATransaction.animationDuration()) {
-                navigationController.navigationBar.alpha = 0
-                navigationController.toolbar.alpha = 0
-
-                if #available(iOS 26.0, *) {
-                    (navigationController.value(forKey: "_floatingBarContainerView") as? UIView)?.alpha = 0
-                }
-
-                self.node.backgroundColor = switch UserDefaults.standard.string(forKey: "Reader.backgroundColor") {
-                    case "system":
-                        .systemBackground
-                    case "white":
-                        .white
-                    default:
-                        .black
-                }
-                self.node.layoutIfNeeded()
-            } completion: { _ in
-                if #available(iOS 27.0, *) {
-                    navigationController.isNavigationBarHidden = true
-                } else {
-                    navigationController.navigationBar.isHidden = true
-                }
-                if #available(iOS 26.0, *) {
-                    navigationController.isToolbarHidden = true
-                } else {
-                    navigationController.toolbar.isHidden = true
-                }
+    private func readerBackgroundColor(barsHidden: Bool) -> UIColor {
+        if barsHidden {
+            switch UserDefaults.standard.string(forKey: "Reader.backgroundColor") {
+                case "system": return .systemBackground
+                case "white": return .white
+                default: return .black
             }
         }
+        if UserDefaults.standard.bool(forKey: "General.useSystemAppearance") {
+            return .systemBackground
+        }
+        return UserDefaults.standard.integer(forKey: "General.appearance") == 0 ? .white : .black
     }
 }
 
