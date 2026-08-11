@@ -47,6 +47,9 @@ class ReaderViewController: BaseObservingViewController {
     private var sessionLastInteraction: Date?
 
     private var hasAppeared = false
+    /// The view controller the reader's back button returns to, whose back button title the
+    /// reader hides while it's on screen.
+    private weak var backButtonHost: UIViewController?
 
     weak var reader: ReaderReaderDelegate?
 
@@ -294,6 +297,12 @@ class ReaderViewController: BaseObservingViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
+        if backButtonHost == nil, let viewControllers = navigationController?.viewControllers {
+            let index = viewControllers.firstIndex { $0 === self }
+            backButtonHost = index.flatMap { $0 > 0 ? viewControllers[$0 - 1] : nil }
+        }
+        backButtonHost?.navigationItem.backButtonDisplayMode = .minimal
+
         // open with the bars hidden, without animating: an animated hide would still be running
         // after a quick pop, and would then be changing bars that belong to the previous screen
         if !hasAppeared {
@@ -352,6 +361,8 @@ class ReaderViewController: BaseObservingViewController {
         navigationController.setNavigationBarHidden(false, animated: animated)
         navigationController.setToolbarHidden(true, animated: animated)
         navigationController.interactivePopGestureRecognizer?.isEnabled = true
+        // the back button title belongs to the screen underneath, not to the reader
+        backButtonHost?.navigationItem.backButtonDisplayMode = .default
     }
 
     private func saveStateOnClose() {
