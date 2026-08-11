@@ -53,6 +53,8 @@ class ReaderViewController: BaseObservingViewController {
         let toolbarAlpha: CGFloat
     }
     private var navigationBarState: NavigationBarState?
+    private let orientationLockId = UUID()
+    private var hasAppeared = false
 
     weak var reader: ReaderReaderDelegate?
 
@@ -100,7 +102,7 @@ class ReaderViewController: BaseObservingViewController {
         return tap
     }()
 
-    var statusBarHidden = false
+    var statusBarHidden = true
 
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
         UIStatusBarAnimation.fade
@@ -184,7 +186,6 @@ class ReaderViewController: BaseObservingViewController {
         add(child: descriptionButtonController)
 
         toolbarItems = [toolbarButtonItemView]
-        navigationController?.isToolbarHidden = false
         navigationController?.toolbar.fitContentViewToToolbar()
 
         // loading indicator
@@ -245,11 +246,6 @@ class ReaderViewController: BaseObservingViewController {
         addObserver(forName: "Reader.disableDoubleTap") { [weak self] notification in
             self?.fakeZoomTapGesture.isEnabled = !(notification.object as? Bool ?? UserDefaults.standard.bool(forKey: "Reader.disableDoubleTap"))
         }
-        addObserver(forName: .readerOrientation) { [weak self] _ in
-            if #available(iOS 16.0, *) {
-                self?.setNeedsUpdateOfSupportedInterfaceOrientations()
-            }
-        }
         let reloadBlock: (Notification) -> Void = { [weak self] _ in
             guard let self else { return }
             self.reader?.setChapter(self.chapter, startPage: self.currentPage)
@@ -303,18 +299,33 @@ class ReaderViewController: BaseObservingViewController {
         }
     }
 
+    /// Stores the state of the shared navigation bar and toolbar, so it can be put back when the
+    /// reader is popped. Has to be called before the reader is pushed, since it starts changing
+    /// that state as soon as its view loads.
+    func captureNavigationState(from navigationController: UINavigationController) {
+        navigationBarState = NavigationBarState(
+            navigationBarHidden: navigationController.isNavigationBarHidden,
+            navigationBarAlpha: navigationController.navigationBar.alpha,
+            toolbarHidden: navigationController.isToolbarHidden,
+            toolbarAlpha: navigationController.toolbar.alpha
+        )
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        // the navigation bar and toolbar are shared with the rest of the app, so their state has
-        // to be put back the way it was when the reader is popped
-        if navigationBarState == nil, let navigationController {
-            navigationBarState = NavigationBarState(
-                navigationBarHidden: navigationController.isNavigationBarHidden,
-                navigationBarAlpha: navigationController.navigationBar.alpha,
-                toolbarHidden: navigationController.isToolbarHidden,
-                toolbarAlpha: navigationController.toolbar.alpha
-            )
+        InterfaceOrientationCoordinator.shared.register(orientations: .portrait, id: orientationLockId)
+
+        // the toolbar has to be enabled for the slider to be laid out, but it starts out
+        // invisible, since the reader opens with its bars hidden
+        navigationController?.isToolbarHidden = false
+        navigationController?.toolbar.alpha = 0
+
+        // open with the bars hidden. changing bar visibility here is folded into the push
+        // transition by uikit, so they slide away along with the screen underneath
+        if !hasAppeared {
+            hasAppeared = true
+            hideBars()
         }
     }
 
@@ -325,13 +336,13 @@ class ReaderViewController: BaseObservingViewController {
         sessionStartDate = Date.now
         sessionLastInteraction = nil
 
-        if statusBarHidden || navigationController?.toolbar.alpha == 0 {
+        if statusBarHidden {
             hideBars()
+        } else {
+            // there's a bug on ios 15 where the toolbar just disappears when adding a child hosting controller
+            navigationController?.isToolbarHidden = false
+            navigationController?.toolbar.alpha = 1
         }
-
-        // there's a bug on ios 15 where the toolbar just disappears when adding a child hosting controller
-        navigationController?.isToolbarHidden = false
-        navigationController?.toolbar.alpha = 1
 
         disableSwipeGestures()
     }
@@ -339,6 +350,7 @@ class ReaderViewController: BaseObservingViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
+        InterfaceOrientationCoordinator.shared.unregister(orientationsWithID: orientationLockId)
         restoreNavigationState(animated: animated)
 
         // an interactive pop can still be cancelled, so don't touch stored data until it commits
@@ -352,19 +364,41 @@ class ReaderViewController: BaseObservingViewController {
         }
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        // the width isn't known when the constraint is made, since the reader hasn't been laid
+        // out into the navigation stack yet
+        if #available(iOS 26.0, *) {
+            toolbarViewWidthConstraint?.constant = view.bounds.width - 32 - 10
+        } else {
+            toolbarViewWidthConstraint?.constant = view.bounds.width
+        }
+    }
+
     private func restoreNavigationState(animated: Bool) {
         guard let navigationController, let state = navigationBarState else { return }
-        navigationBarState = nil
 
         navigationController.navigationBar.isHidden = false
-        navigationController.navigationBar.alpha = state.navigationBarAlpha
+        navigationController.setNavigationBarHidden(state.navigationBarHidden, animated: animated)
+        // the reader may have faded the bar out, so bring it back with the transition
+        UIView.animate(withDuration: animated ? CATransaction.animationDuration() : 0) {
+            navigationController.navigationBar.alpha = state.navigationBarAlpha
+        }
+
+        // when the reader's bars are hidden there's nothing to animate away, and restoring the
+        // toolbar's alpha mid transition would flash the slider back into view
         navigationController.toolbar.isHidden = false
-        navigationController.toolbar.alpha = state.toolbarAlpha
+        if statusBarHidden {
+            navigationController.setToolbarHidden(state.toolbarHidden, animated: false)
+            navigationController.toolbar.alpha = state.toolbarAlpha
+        } else {
+            navigationController.setToolbarHidden(state.toolbarHidden, animated: animated)
+        }
+
         if #available(iOS 26.0, *) {
             (navigationController.value(forKey: "_floatingBarContainerView") as? UIView)?.alpha = 1
         }
-        navigationController.setNavigationBarHidden(state.navigationBarHidden, animated: animated)
-        navigationController.setToolbarHidden(state.toolbarHidden, animated: animated)
         navigationController.interactivePopGestureRecognizer?.isEnabled = true
     }
 
@@ -381,15 +415,6 @@ class ReaderViewController: BaseObservingViewController {
         guard currentPage >= 1 else { return }
         Task {
             await updateReadPosition()
-        }
-    }
-
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        switch UserDefaults.standard.string(forKey: "Reader.orientation") {
-            case "device": .all
-            case "portrait": .portrait
-            case "landscape": .landscape
-            default: .all
         }
     }
 
@@ -1069,11 +1094,10 @@ extension ReaderViewController: UIPencilInteractionDelegate {
 // MARK: - Bar Visibility
 extension ReaderViewController {
     @objc func toggleBarVisibility() {
-        guard let navigationController else { return }
-        if !navigationController.navigationBar.isHidden {
-            hideBars()
-        } else {
+        if statusBarHidden {
             showBars()
+        } else {
+            hideBars()
         }
     }
 
