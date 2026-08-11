@@ -50,4 +50,16 @@ extension NavigationController: UIGestureRecognizerDelegate {
         // popping the root, or interrupting a transition, leaves the navigation stack broken
         return viewControllers.count > 1 && transitionCoordinator == nil
     }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer === interactivePopGestureRecognizer else { return true }
+        // a control that reaches into the screen edge, like the reader's page slider, keeps its
+        // own touches rather than losing them to the back gesture
+        var view = touch.view
+        while let current = view {
+            if current is UIControl { return false }
+            view = current.superview
+        }
+        return true
+    }
 }
