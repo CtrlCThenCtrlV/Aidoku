@@ -651,8 +651,7 @@ extension ReaderViewController: ReaderHoldingDelegate {
         let page = max(1, min(pages.lowerBound, totalPages))
         currentPage = page
         currentPosition = position
-        toolbarView.currentPage = page
-        toolbarView.updateSliderPosition()
+        toolbarView.setProgress(currentPage: page, totalPages: totalPages)
         if pages.upperBound >= totalPages {
             setCompleted()
         }
@@ -678,9 +677,12 @@ extension ReaderViewController: ReaderHoldingDelegate {
         }
     }
 
-    func setPages(_ pages: [Page]) {
+    func setPages(_ pages: [Page], currentPage: Int?) {
         self.pages = pages
-        toolbarView.totalPages = pages.count
+        toolbarView.setProgress(
+            currentPage: pages.isEmpty ? nil : currentPage,
+            totalPages: pages.count
+        )
         activityIndicator.stopAnimating()
         if pages.isEmpty {
             showLoadFailAlert()

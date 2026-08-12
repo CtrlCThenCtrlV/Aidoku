@@ -124,17 +124,16 @@ extension LocalFileManager {
 }
 
 extension LocalFileManager {
-    // fetch pages for a chapter from file system
+    // Build reader pages from the manifest, which owns page order and archive paths.
     func fetchPages(mangaId: String, chapterId: String) async -> [AidokuRunner.Page] {
-        guard let cbzPath = await LocalFileDataManager.shared.fetchChapterArchivePath(mangaId: mangaId, chapterId: chapterId)
-        else { return [] }
-
-        let documentsDir = FileManager.default.documentDirectory
-        let archiveURL = documentsDir.appendingPathComponent(cbzPath)
-        return readPages(from: archiveURL)
+        guard let stored = await fetchManifest(mangaId: mangaId, chapterId: chapterId) else { return [] }
+        let archiveURL = FileManager.default.documentDirectory.appendingPathComponent(stored.archivePath)
+        return stored.manifest.pages.map {
+            AidokuRunner.Page(content: .zipFile(url: archiveURL, filePath: $0.path))
+        }
     }
 
-    // read pages from an archive file
+    // Compatibility path for download archives that do not have a local manifest.
     nonisolated func readPages(from archiveURL: URL) -> [AidokuRunner.Page] {
         let archive: Archive
         do {
@@ -145,7 +144,6 @@ extension LocalFileManager {
         }
 
         var descriptionFiles: [Entry] = []
-
         var pages = archive
             .filter { entry in
                 if entry.path.hasSuffix("desc.txt") {
@@ -154,13 +152,8 @@ extension LocalFileManager {
                 }
                 return Self.isArchivePage(path: entry.path)
             }
-            // sort by file name
-            .sorted {
-                $0.path.localizedStandardCompare($1.path) == .orderedAscending
-            }
-            .map { entry in
-                AidokuRunner.Page(content: .zipFile(url: archiveURL, filePath: entry.path))
-            }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            .map { AidokuRunner.Page(content: .zipFile(url: archiveURL, filePath: $0.path)) }
 
         for entry in descriptionFiles {
             guard
@@ -175,20 +168,13 @@ extension LocalFileManager {
 
             do {
                 var descriptionData = Data()
-                _ = try archive.extract(
-                    entry,
-                    consumer: { data in
-                        descriptionData.append(data)
-                    }
-                )
+                _ = try archive.extract(entry) { descriptionData.append($0) }
                 pages[index - 1].hasDescription = true
                 pages[index - 1].description = String(data: descriptionData, encoding: .utf8)
             } catch {
                 LogManager.logger.error("Failed to extract page description text from archive: \(error)")
-                continue
             }
         }
-
         return pages
     }
 }
@@ -465,7 +451,15 @@ extension LocalFileManager {
             else {
                 throw LocalFileManagerError.invalidImage
             }
-            pages.append(.init(path: entry.path, width: width, height: height))
+            let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue
+            let hasAlpha = (properties[kCGImagePropertyHasAlpha] as? NSNumber)?.boolValue
+            pages.append(.init(
+                path: entry.path,
+                width: width,
+                height: height,
+                orientation: orientation,
+                hasAlpha: hasAlpha
+            ))
         }
         return ArchiveChapterManifest(pages: pages)
     }

@@ -21,10 +21,25 @@ struct ArchivePageMetadata: Codable, Hashable, Sendable {
     let path: String
     let width: Int
     let height: Int
+    let orientation: Int?
+    let hasAlpha: Bool?
+
+    var displayWidth: Int {
+        swapsDimensions ? height : width
+    }
+
+    var displayHeight: Int {
+        swapsDimensions ? width : height
+    }
+
+    private var swapsDimensions: Bool {
+        guard let orientation else { return false }
+        return (5...8).contains(orientation)
+    }
 }
 
 struct ArchiveChapterManifest: Codable, Hashable, Sendable {
-    static let version: Int16 = 1
+    static let version: Int16 = 2
 
     let pages: [ArchivePageMetadata]
 

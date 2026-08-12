@@ -31,6 +31,7 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
         let pageIndex: Int
         let archiveURL: URL
         let path: String
+        let hasAlpha: Bool?
         let frame: CGRect
     }
 
@@ -38,6 +39,8 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
     private var pageLayouts: [PageLayout] = []
     private var visibleViews: [String: UIImageView] = [:]
     private var imageTasks: [String: Task<Void, Never>] = [:]
+    private var failedImageRetryAfter: [String: Date] = [:]
+    private var imageFailureCounts: [String: Int] = [:]
     private var reusePool: [UIImageView] = []
     private var currentChapterIndex = 0
     private var previousPage = 0
@@ -48,6 +51,7 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
     private var lastLayoutWidth: CGFloat = 0
     private var observedZoomScale: CGFloat = 1
     private var isLoadingChapter = false
+    private var loadGeneration = 0
 
     init(manga: AidokuRunner.Manga) {
         self.manga = manga
@@ -121,9 +125,10 @@ private extension ReaderWebtoonViewController {
             Int64(values?.fileSize ?? -1) == stored.fileSize,
             values?.contentModificationDate == stored.modifiedAt
         else { return nil }
-        let pages = await LocalFileManager.shared.fetchPages(mangaId: manga.key, chapterId: chapter.key)
-            .map { $0.toOld(sourceId: LocalSourceRunner.sourceKey, chapterId: chapter.key) }
-        guard pages.count == stored.manifest.pages.count else { return nil }
+        let pages = stored.manifest.pages.map {
+            AidokuRunner.Page(content: .zipFile(url: archiveURL, filePath: $0.path))
+                .toOld(sourceId: LocalSourceRunner.sourceKey, chapterId: chapter.key)
+        }
         return ChapterBlock(
             chapter: chapter,
             archiveURL: archiveURL,
@@ -140,7 +145,7 @@ private extension ReaderWebtoonViewController {
         for blockIndex in blocks.indices {
             let start = y
             for (pageIndex, page) in blocks[blockIndex].metadata.enumerated() {
-                let height = width * CGFloat(page.height) / CGFloat(page.width)
+                let height = width * CGFloat(page.displayHeight) / CGFloat(page.displayWidth)
                 let frame = CGRect(x: 0, y: y, width: width, height: height)
                 layouts.append(PageLayout(
                     key: "\(blocks[blockIndex].chapter.key)\u{1f}\(pageIndex)",
@@ -148,6 +153,7 @@ private extension ReaderWebtoonViewController {
                     pageIndex: pageIndex,
                     archiveURL: blocks[blockIndex].archiveURL,
                     path: page.path,
+                    hasAlpha: page.hasAlpha,
                     frame: frame
                 ))
                 y += height
@@ -192,13 +198,16 @@ private extension ReaderWebtoonViewController {
     func updateVisiblePages() {
         guard !pageLayouts.isEmpty else { return }
         let viewport = viewportInCanvas
-        let preload = viewport.insetBy(dx: 0, dy: -viewport.height * 1.5)
+        let margin = max(viewport.height, scrollView.bounds.height) * 1.5
+        let preload = viewport.insetBy(dx: 0, dy: -margin)
         let wanted = pageLayouts.filter { $0.frame.intersects(preload) }
         let wantedKeys = Set(wanted.map(\.key))
 
         for key in visibleViews.keys where !wantedKeys.contains(key) {
             guard let imageView = visibleViews.removeValue(forKey: key) else { continue }
             imageTasks.removeValue(forKey: key)?.cancel()
+            failedImageRetryAfter[key] = nil
+            imageFailureCounts[key] = nil
             imageView.removeFromSuperview()
             imageView.image = nil
             reusePool.append(imageView)
@@ -206,6 +215,7 @@ private extension ReaderWebtoonViewController {
         for layout in wanted {
             if let imageView = visibleViews[layout.key] {
                 imageView.frame = layout.frame
+                loadImage(for: layout, into: imageView)
             } else {
                 show(layout)
             }
@@ -229,6 +239,7 @@ private extension ReaderWebtoonViewController {
         imageView.contentMode = .scaleToFill
         imageView.clipsToBounds = true
         imageView.backgroundColor = .black
+        imageView.isOpaque = layout.hasAlpha == false
         imageView.frame = layout.frame
         canvasView.addSubview(imageView)
         visibleViews[layout.key] = imageView
@@ -238,24 +249,38 @@ private extension ReaderWebtoonViewController {
 
     private func loadImage(for layout: PageLayout, into imageView: UIImageView) {
         guard imageView.image == nil, imageTasks[layout.key] == nil else { return }
+        if let retryAfter = failedImageRetryAfter[layout.key], retryAfter > Date() { return }
         imageTasks[layout.key] = Task { [weak self, weak imageView] in
             let image = await Self.loadImage(
                 archiveURL: layout.archiveURL,
                 path: layout.path
             )
-            guard
-                !Task.isCancelled,
-                let self,
-                let image,
-                self.visibleViews[layout.key] === imageView
-            else {
-                if !Task.isCancelled {
-                    self?.imageTasks[layout.key] = nil
+            guard !Task.isCancelled, let self else { return }
+            self.imageTasks[layout.key] = nil
+            guard self.visibleViews[layout.key] === imageView else { return }
+            guard let image else {
+                let failureCount = self.imageFailureCounts[layout.key, default: 0] + 1
+                self.imageFailureCounts[layout.key] = failureCount
+                guard failureCount < 2 else { return }
+                let retryAfter = Date().addingTimeInterval(2)
+                self.failedImageRetryAfter[layout.key] = retryAfter
+                Task { [weak self, weak imageView] in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard
+                        !Task.isCancelled,
+                        let self,
+                        let imageView,
+                        self.failedImageRetryAfter[layout.key] == retryAfter,
+                        self.visibleViews[layout.key] === imageView
+                    else { return }
+                    self.failedImageRetryAfter[layout.key] = nil
+                    self.loadImage(for: layout, into: imageView)
                 }
                 return
             }
             imageView?.image = image
-            self.imageTasks[layout.key] = nil
+            self.failedImageRetryAfter[layout.key] = nil
+            self.imageFailureCounts[layout.key] = nil
         }
     }
 
@@ -267,7 +292,8 @@ private extension ReaderWebtoonViewController {
                     guard let entry = archive[path] else { return nil }
                     var data = Data()
                     _ = try archive.extract(entry) { data.append($0) }
-                    return UIImage(data: data)
+                    let image = UIImage(data: data)
+                    return image?.preparingForDisplay() ?? image
                 } catch {
                     return nil
                 }
@@ -284,15 +310,11 @@ extension ReaderWebtoonViewController: UIScrollViewDelegate {
         let zoomScaleChanged = abs(scrollView.zoomScale - observedZoomScale) > 0.001
         observedZoomScale = scrollView.zoomScale
         guard
-            !isLoadingChapter,
             !zoomScaleChanged,
             !scrollView.isZooming,
             !scrollView.isZoomBouncing
         else { return }
-        updateVisiblePages()
-        guard !isSliding else { return }
-        updateReadingPosition()
-        preloadAtEdges()
+        settle()
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -303,13 +325,16 @@ extension ReaderWebtoonViewController: UIScrollViewDelegate {
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
         observedZoomScale = scale
-        updateVisiblePages()
-        updateReadingPosition()
-        preloadAtEdges()
+        settle()
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
         observedZoomScale = scrollView.zoomScale
+        settle()
+    }
+
+    private func settle() {
+        guard !isLoadingChapter, !isSliding else { return }
         updateVisiblePages()
         updateReadingPosition()
         preloadAtEdges()
@@ -318,16 +343,16 @@ extension ReaderWebtoonViewController: UIScrollViewDelegate {
     private func updateReadingPosition() {
         let middle = viewportInCanvas.midY
         guard let blockIndex = blocks.firstIndex(where: { $0.range.contains(middle) }) else { return }
+        guard let layout = pageLayouts.first(where: {
+            $0.chapterIndex == blockIndex && $0.frame.contains(CGPoint(x: 1, y: middle))
+        }) else { return }
+        let page = layout.pageIndex + 1
         if blockIndex != currentChapterIndex {
             currentChapterIndex = blockIndex
             let block = blocks[blockIndex]
             delegate?.setChapter(block.chapter)
-            delegate?.setPages(block.pages)
+            delegate?.setPages(block.pages, currentPage: page)
         }
-        guard let layout = pageLayouts.first(where: { $0.chapterIndex == blockIndex && $0.frame.contains(CGPoint(x: 1, y: middle)) }) else {
-            return
-        }
-        let page = layout.pageIndex + 1
         if page != previousPage {
             previousPage = page
             delegate?.setCurrentPage(page, position: nil)
@@ -340,24 +365,30 @@ extension ReaderWebtoonViewController: UIScrollViewDelegate {
         let threshold = viewport.height * 3
         if viewport.minY < threshold, !loadingPrevious {
             loadingPrevious = true
+            let generation = loadGeneration
             Task { [weak self] in
                 guard let self else { return }
-                defer { loadingPrevious = false }
+                defer {
+                    if generation == loadGeneration { loadingPrevious = false }
+                }
                 guard let chapter = delegate?.getPreviousChapter(), !blocks.contains(where: { $0.chapter == chapter }) else { return }
-                if let block = await loadBlock(chapter: chapter) { prepend(block) }
+                if let block = await loadBlock(chapter: chapter), generation == loadGeneration { prepend(block) }
             }
         }
         let remaining = canvasView.bounds.maxY - viewport.maxY
         if remaining < threshold, !loadingNext {
             loadingNext = true
+            let generation = loadGeneration
             Task { [weak self] in
                 guard let self else { return }
-                defer { loadingNext = false }
+                defer {
+                    if generation == loadGeneration { loadingNext = false }
+                }
                 guard let chapter = delegate?.getNextChapter(), !blocks.contains(where: { $0.chapter == chapter }) else {
                     if delegate?.getNextChapter() == nil { delegate?.setCompleted() }
                     return
                 }
-                if let block = await loadBlock(chapter: chapter) { append(block) }
+                if let block = await loadBlock(chapter: chapter), generation == loadGeneration { append(block) }
             }
         }
     }
@@ -385,7 +416,7 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
 
     func sliderStopped(value: CGFloat) {
         isSliding = false
-        updateReadingPosition()
+        settle()
     }
 
     func handleDoubleTap(at point: CGPoint) {
@@ -412,12 +443,18 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
     }
 
     func setChapter(_ chapter: AidokuRunner.Chapter, startPage: Int) {
+        loadGeneration += 1
+        let generation = loadGeneration
         initialStartPage = max(1, startPage)
         isLoadingChapter = true
         scrollView.setZoomScale(1, animated: false)
         observedZoomScale = 1
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
+        failedImageRetryAfter.removeAll()
+        imageFailureCounts.removeAll()
+        loadingPrevious = false
+        loadingNext = false
         visibleViews.values.forEach { $0.removeFromSuperview() }
         visibleViews.removeAll()
         blocks.removeAll()
@@ -425,23 +462,29 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
         Task { [weak self] in
             guard let self else { return }
             guard let block = await loadBlock(chapter: chapter) else {
+                guard generation == loadGeneration else { return }
                 isLoadingChapter = false
+                delegate?.setPages([], currentPage: nil)
                 return
             }
+            guard generation == loadGeneration else { return }
             var loadedBlocks = [block]
             if UserDefaults.standard.bool(forKey: "Reader.verticalInfiniteScroll") {
                 if let previous = delegate?.getPreviousChapter(), let previousBlock = await loadBlock(chapter: previous) {
+                    guard generation == loadGeneration else { return }
                     loadedBlocks.insert(previousBlock, at: 0)
                 }
                 if let next = delegate?.getNextChapter(), let nextBlock = await loadBlock(chapter: next) {
+                    guard generation == loadGeneration else { return }
                     loadedBlocks.append(nextBlock)
                 }
             }
+            guard generation == loadGeneration else { return }
             blocks = loadedBlocks
             currentChapterIndex = blocks.firstIndex(where: { $0.chapter == chapter }) ?? 0
             rebuildLayout()
-            delegate?.setPages(block.pages)
             let pageIndex = min(max(0, initialStartPage - 1), block.metadata.count - 1)
+            delegate?.setPages(block.pages, currentPage: pageIndex + 1)
             if let layout = pageLayouts.first(where: {
                 $0.chapterIndex == self.currentChapterIndex && $0.pageIndex == pageIndex
             }) {
@@ -459,5 +502,4 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
         let middle = viewportInCanvas.midY
         return (pageLayouts.first { $0.chapterIndex == chapterIndex && $0.frame.contains(CGPoint(x: 1, y: middle)) }?.pageIndex ?? 0) + 1
     }
-
 }

@@ -9,6 +9,8 @@ import Combine
 import UIKit
 
 class ReaderToolbarView: UIView {
+    private var isSettingProgress = false
+
     var currentPageValue: Int? {
         didSet {
             if oldValue != currentPageValue {
@@ -19,14 +21,18 @@ class ReaderToolbarView: UIView {
     }
     var currentPage: Int? {
         didSet {
-            updatePageLabels()
-            updateSliderPosition()
+            if !isSettingProgress {
+                updatePageLabels()
+                updateSliderPosition()
+            }
         }
     }
     var totalPages: Int? {
         didSet {
-            updatePageLabels()
-            updateSliderPosition()
+            if !isSettingProgress {
+                updatePageLabels()
+                updateSliderPosition()
+            }
         }
     }
 
@@ -149,8 +155,20 @@ class ReaderToolbarView: UIView {
         incognitoModeLabel.text = NSLocalizedString("INCOGNITO_MODE")
     }
 
+    func setProgress(currentPage: Int?, totalPages: Int?) {
+        isSettingProgress = true
+        self.currentPage = currentPage
+        self.totalPages = totalPages
+        isSettingProgress = false
+        updatePageLabels()
+        updateSliderPosition()
+    }
+
     func updateSliderPosition() {
-        guard let currentPage = currentPage, let totalPages = totalPages else { return }
+        guard let currentPage, let totalPages, totalPages > 0, (1...totalPages).contains(currentPage) else {
+            sliderView.move(toValue: 0)
+            return
+        }
         sliderView.move(toValue: CGFloat(currentPage - 1) / max(CGFloat(totalPages - 1), 1))
     }
 }

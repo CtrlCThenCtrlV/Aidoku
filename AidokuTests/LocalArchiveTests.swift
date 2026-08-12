@@ -33,11 +33,18 @@ import Testing
     @Test("Binary chapter manifest round trip")
     func binaryManifestRoundTrip() throws {
         let manifest = ArchiveChapterManifest(pages: [
-            .init(path: "001.jpg", width: 800, height: 2400),
-            .init(path: "nested/002.webp", width: 1080, height: 4096)
+            .init(path: "001.jpg", width: 800, height: 2400, orientation: 1, hasAlpha: false),
+            .init(path: "nested/002.webp", width: 1080, height: 4096, orientation: nil, hasAlpha: true)
         ])
         let data = try manifest.encoded()
         #expect(data.starts(with: Data("bplist".utf8)))
         #expect(try ArchiveChapterManifest.decode(data) == manifest)
+    }
+
+    @Test("EXIF orientation swaps display dimensions")
+    func orientedManifestDimensions() {
+        let page = ArchivePageMetadata(path: "001.jpg", width: 1200, height: 800, orientation: 6, hasAlpha: false)
+        #expect(page.displayWidth == 800)
+        #expect(page.displayHeight == 1200)
     }
 }
