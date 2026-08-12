@@ -8,6 +8,7 @@
 import AidokuRunner
 import CoreData
 import Foundation
+import ImageIO
 import ZIPFoundation
 
 #if os(macOS)
@@ -48,6 +49,10 @@ actor LocalFileManager {
 }
 
 extension LocalFileManager {
+    func fetchManifest(mangaId: String, chapterId: String) async -> StoredArchiveManifest? {
+        await LocalFileDataManager.shared.fetchArchiveManifest(mangaId: mangaId, chapterId: chapterId)
+    }
+
     // get info about a file to be imported
     func loadImportFileInfo(url: URL) -> ImportFileInfo? {
         // if the given url comes from an imported file that isn't copied, we need to do this
@@ -268,6 +273,8 @@ extension LocalFileManager {
             throw LocalFileManagerError.noImagesFound
         }
 
+        let manifest = try makeManifest(archive: archive, entries: pageEntries)
+
         let comicInfo = ComicInfo.load(from: archive)
 
         let resolvedMangaId = (mangaId ?? mangaName ?? url.deletingPathExtension().lastPathComponent).normalized
@@ -406,15 +413,61 @@ extension LocalFileManager {
             url.deletingPathExtension().lastPathComponent
         }
 
-        await LocalFileDataManager.shared.createChapter(
+        let chapterId = UUID().uuidString
+        let didCreateChapter = await LocalFileDataManager.shared.createChapter(
             mangaId: resolvedMangaId,
             url: destURL,
-            id: UUID().uuidString,
+            id: chapterId,
             title: title,
             volume: volume,
             chapter: chapter,
             comicInfo: comicInfo
         )
+        guard didCreateChapter else {
+            if !skipUpload { try? fileManager.removeItem(at: destURL) }
+            throw LocalFileManagerError.fileCopyFailed
+        }
+        do {
+            try await LocalFileDataManager.shared.saveArchiveManifest(
+                mangaId: resolvedMangaId,
+                chapterId: chapterId,
+                archiveURL: destURL,
+                manifest: manifest
+            )
+        } catch {
+            _ = await LocalFileDataManager.shared.removeChapter(mangaId: resolvedMangaId, chapterId: chapterId)
+            if !skipUpload { try? fileManager.removeItem(at: destURL) }
+            LogManager.logger.error("Failed to save archive manifest: \(error)")
+            throw LocalFileManagerError.fileCopyFailed
+        }
+    }
+
+    private nonisolated func makeManifest(
+        archive: Archive,
+        entries: [Entry]
+    ) throws(LocalFileManagerError) -> ArchiveChapterManifest {
+        var pages: [ArchivePageMetadata] = []
+        pages.reserveCapacity(entries.count)
+        for entry in entries {
+            var data = Data()
+            do {
+                _ = try archive.extract(entry) { data.append($0) }
+            } catch {
+                throw LocalFileManagerError.cannotReadArchive
+            }
+            guard
+                let source = CGImageSourceCreateWithData(data as CFData, nil),
+                let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+                width > 0,
+                height > 0
+            else {
+                throw LocalFileManagerError.invalidImage
+            }
+            pages.append(.init(path: entry.path, width: width, height: height))
+        }
+        return ArchiveChapterManifest(pages: pages)
     }
 
 }
@@ -508,6 +561,8 @@ extension LocalFileManager {
         } catch {
             LogManager.logger.error("Failed to remove Local folder: \(error)")
         }
+
+        await LocalFileDataManager.shared.removeAllArchiveManifests()
 
         // update database
         self.suppressFileEvents = false

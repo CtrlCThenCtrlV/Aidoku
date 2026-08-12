@@ -5,6 +5,7 @@
 //  Created by Skitty on 6/10/25.
 //
 
+import CoreData
 import Foundation
 
 enum LocalFileManagerError: Error {
@@ -12,7 +13,55 @@ enum LocalFileManagerError: Error {
     case tempDirectoryUnavailable
     case cannotReadArchive
     case noImagesFound
+    case invalidImage
     case fileCopyFailed
+}
+
+struct ArchivePageMetadata: Codable, Hashable, Sendable {
+    let path: String
+    let width: Int
+    let height: Int
+}
+
+struct ArchiveChapterManifest: Codable, Hashable, Sendable {
+    static let version: Int16 = 1
+
+    let pages: [ArchivePageMetadata]
+
+    func encoded() throws -> Data {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        return try encoder.encode(self)
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data)
+    }
+}
+
+@objc(ArchiveManifestObject)
+final class ArchiveManifestObject: NSManagedObject {
+    @NSManaged var key: String
+    @NSManaged var mangaId: String
+    @NSManaged var chapterId: String
+    @NSManaged var archivePath: String
+    @NSManaged var archiveModifiedAt: Date
+    @NSManaged var archiveFileSize: Int64
+    @NSManaged var manifestVersion: Int16
+    @NSManaged var pagesData: Data
+}
+
+extension ArchiveManifestObject {
+    @nonobjc class func fetchRequest() -> NSFetchRequest<ArchiveManifestObject> {
+        NSFetchRequest<ArchiveManifestObject>(entityName: "ArchiveManifest")
+    }
+}
+
+struct StoredArchiveManifest: Sendable {
+    let archivePath: String
+    let modifiedAt: Date
+    let fileSize: Int64
+    let manifest: ArchiveChapterManifest
 }
 
 struct LocalSeriesInfo: Hashable {

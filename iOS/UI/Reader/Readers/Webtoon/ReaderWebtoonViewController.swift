@@ -2,721 +2,404 @@
 //  ReaderWebtoonViewController.swift
 //  Aidoku (iOS)
 //
-//  Created by Skitty on 9/27/22.
-//
 
 import AidokuRunner
-import AsyncDisplayKit
-import Nuke
+import ImageIO
 import UIKit
+import ZIPFoundation
 
-class ReaderWebtoonViewController: ZoomableCollectionViewController {
-
-    let viewModel: ReaderWebtoonViewModel
+/// A cell-free Webtoon reader. Chapter manifests form one continuous canvas and
+/// image views are materialized only around the viewport.
+@MainActor
+final class ReaderWebtoonViewController: BaseObservingViewController {
     weak var delegate: ReaderHoldingDelegate?
 
-    var chapter: AidokuRunner.Chapter?
-//    private let prefetcher = ImagePrefetcher()
+    private let manga: AidokuRunner.Manga
+    private let scrollView = UIScrollView()
+    private let canvasView = UIView()
 
-    // Indicates if infinite scroll is enabled
-    private lazy var infinite = UserDefaults.standard.bool(forKey: "Reader.verticalInfiniteScroll")
+    private struct ChapterBlock {
+        let chapter: AidokuRunner.Chapter
+        let archiveURL: URL
+        let metadata: [ArchivePageMetadata]
+        let pages: [Page]
+        var range: Range<CGFloat> = 0..<0
+    }
+
+    private struct PageLayout {
+        let key: String
+        let chapterIndex: Int
+        let pageIndex: Int
+        let archiveURL: URL
+        let path: String
+        let frame: CGRect
+    }
+
+    private var blocks: [ChapterBlock] = []
+    private var pageLayouts: [PageLayout] = []
+    private var visibleViews: [String: UIImageView] = [:]
+    private var imageTasks: [String: Task<Void, Never>] = [:]
+    private var reusePool: [UIImageView] = []
+    private var currentChapterIndex = 0
+    private var previousPage = 0
+    private var isSliding = false
     private var loadingPrevious = false
     private var loadingNext = false
-
-    // The chapters currently shown in the reader view
-    private var chapters: [AidokuRunner.Chapter] = []
-    // The pages corresponding to the `chapters` variable
-    private var pages: [[Page]] = []
-
-    // Indicates if the page slider is currently in use
-    private var isSliding = false
-    // Indicates if a zoom gesture is in progress
-    var isZooming = false
-    // Indicates if a scroll is in progress
-    private var isScrolling = false
-    // Indicates if an info refresh should be done if info pages are off screen
-    private var needsInfoRefresh = false
-
-    // Stores the last calculated page number
-    private var previousPage = 0
+    private var initialStartPage = 1
+    private var lastLayoutWidth: CGFloat = 0
 
     init(manga: AidokuRunner.Manga) {
-        self.viewModel = ReaderWebtoonViewModel(manga: manga)
-        let layout = VerticalContentOffsetPreservingLayout()
-        layout.spacing = 0
-        super.init(layout: layout)
+        self.manga = manga
+        super.init()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
     override func configure() {
         super.configure()
-
-        collectionNode.delegate = self
-        collectionNode.dataSource = self
-//        collectionNode.view.prefetchDataSource = self
-//        collectionNode.isPrefetchingEnabled = true
-
-        // override texture's automatic decreased preloading range
-        collectionNode.setTuningParameters(collectionNode.tuningParameters(for: .display), for: .minimum, rangeType: .display)
-        collectionNode.setTuningParameters(collectionNode.tuningParameters(for: .preload), for: .minimum, rangeType: .preload)
-        collectionNode.setTuningParameters(collectionNode.tuningParameters(for: .display), for: .lowMemory, rangeType: .display)
-        collectionNode.setTuningParameters(collectionNode.tuningParameters(for: .preload), for: .lowMemory, rangeType: .preload)
-
-        scrollView.contentInset = .zero
+        view.backgroundColor = .black
+        scrollView.delegate = self
+        scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.showsVerticalScrollIndicator = false
         scrollView.showsHorizontalScrollIndicator = false
-        scrollView.contentInsetAdjustmentBehavior = .never
-        scrollView.bounces = false // bouncing can cause issues with page appending
-        scrollView.scrollsToTop = false // dont want status bar tap to work
-        scrollNode.insetsLayoutMarginsFromSafeArea = false
-
-        if #available(iOS 27.0, *) {
-            scrollView.topEdgeEffect.style = .soft
-            collectionNode.view.topEdgeEffect.style = .soft
-        }
-
-        collectionNode.contentInset = .zero
-        collectionNode.showsVerticalScrollIndicator = false
-        collectionNode.showsHorizontalScrollIndicator = false
-        collectionNode.view.contentInsetAdjustmentBehavior = .never
-        collectionNode.view.bounces = false
-        collectionNode.view.scrollsToTop = false
-
-        collectionNode.automaticallyManagesSubnodes = true
-        collectionNode.shouldAnimateSizeChanges = false
-        collectionNode.insetsLayoutMarginsFromSafeArea = false
-
+        scrollView.alwaysBounceVertical = true
+        scrollView.bounces = true
+        scrollView.bouncesZoom = true
+        scrollView.scrollsToTop = false
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 5
+        scrollView.decelerationRate = .normal
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        canvasView.backgroundColor = .clear
+        scrollView.addSubview(canvasView)
+        view.addSubview(scrollView)
+    }
 
-        zoomView.doubleTapEnabled = !UserDefaults.standard.bool(forKey: "Reader.disableDoubleTap")
-        zoomView.onZoomScaleChanged = { [weak self] scale in
-            self?.setLiveTextButtonHidden(scale != 1)
+    override func constrain() {
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard view.bounds.width > 0, view.bounds.width != lastLayoutWidth else { return }
+        let oldBlock = blocks[safe: currentChapterIndex]
+        let oldProgress = chapterProgress(in: oldBlock)
+        lastLayoutWidth = view.bounds.width
+        rebuildLayout()
+        if let oldBlock, let index = blocks.firstIndex(where: { $0.chapter == oldBlock.chapter }) {
+            scrollToProgress(oldProgress, blockIndex: index)
         }
     }
 
     override func observe() {
-        addObserver(forName: "Reader.verticalInfiniteScroll") { [weak self] notification in
-            self?.infinite = notification.object as? Bool ?? UserDefaults.standard.bool(forKey: "Reader.verticalInfiniteScroll")
-        }
-        addObserver(forName: "Reader.disableDoubleTap") { [weak self] notification in
-            self?.zoomView.doubleTapEnabled = !(notification.object as? Bool ?? UserDefaults.standard.bool(forKey: "Reader.disableDoubleTap"))
-        }
-        addObserver(forName: .readerShowingBars) { [weak self] _ in
-            self?.setLiveTextButtonHidden(false)
-        }
-        addObserver(forName: .readerHidingBars) { [weak self] _ in
-            self?.setLiveTextButtonHidden(true)
-        }
-
         addObserver(forName: UIApplication.didReceiveMemoryWarningNotification.rawValue) { [weak self] _ in
-            // clear live text analysis
-            LogManager.logger.warn("Received memory warning")
-
-            if #available(iOS 16.0, *) {
-                self?.collectionNode.visibleNodes.forEach { node in
-                    guard let node = node as? ReaderWebtoonPageNode else { return }
-                    node.imageNode.imageAnalaysisInteraction = nil
-                }
-            }
-        }
-    }
-
-    enum ScreenPosition {
-        case top
-        case middle
-        case bottom
-    }
-
-    /// Get the current row of the page view at `pos`
-    func getCurrentPagePath(pos: ScreenPosition = .middle) -> IndexPath? {
-        let additional: CGFloat
-        switch pos {
-            case .top: additional = 0
-            case .middle: additional = collectionNode.bounds.height / 2
-            case .bottom: additional = collectionNode.bounds.height
-        }
-        let currentPoint = CGPoint(x: collectionNode.contentOffset.x, y: collectionNode.contentOffset.y + additional)
-        return collectionNode.indexPathForItem(at: currentPoint)
-    }
-
-    func getCurrentPage() -> Int {
-        guard
-            let chapter = chapter,
-            let chapterIndex = chapters.firstIndex(of: chapter),
-            let currentPages = pages[safe: chapterIndex]
-        else { return 0 }
-        let pageRow = getCurrentPagePath()?.row ?? 0
-        let hasStartInfo = currentPages.first?.type != .imagePage
-        return min(
-            max(pageRow + (hasStartInfo ? 0 : 1), 0),
-            currentPages.count - (hasStartInfo ? 1 : 0)
-        )
-    }
-
-    private func setLiveTextButtonHidden(_ hidden: Bool) {
-        collectionNode.visibleNodes.forEach {
-            guard let pageNode = $0 as? ReaderWebtoonPageNode else { return }
-            if hidden || delegate?.barsHidden == true {
-                pageNode.setLiveTextHidden(true)
-            } else {
-                let scale = zoomView.scrollNode.view.zoomScale
-                pageNode.setLiveTextHidden(scale != 1)
-            }
+            self?.trimImages(to: self?.scrollView.bounds ?? .zero)
         }
     }
 }
 
-// MARK: - Scroll View Delegate
-extension ReaderWebtoonViewController {
-    override func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        super.scrollViewWillBeginDragging(scrollView)
-        setLiveTextButtonHidden(true)
+// MARK: - Loading and layout
+private extension ReaderWebtoonViewController {
+    func loadBlock(chapter: AidokuRunner.Chapter) async -> ChapterBlock? {
+        guard
+            let stored = await LocalFileManager.shared.fetchManifest(mangaId: manga.key, chapterId: chapter.key),
+            !stored.manifest.pages.isEmpty
+        else { return nil }
+        let archiveURL = FileManager.default.documentDirectory.appendingPathComponent(stored.archivePath)
+        let values = try? archiveURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        guard
+            archiveURL.exists,
+            Int64(values?.fileSize ?? -1) == stored.fileSize,
+            values?.contentModificationDate == stored.modifiedAt
+        else { return nil }
+        let pages = await LocalFileManager.shared.fetchPages(mangaId: manga.key, chapterId: chapter.key)
+            .map { $0.toOld(sourceId: LocalSourceRunner.sourceKey, chapterId: chapter.key) }
+        guard pages.count == stored.manifest.pages.count else { return nil }
+        return ChapterBlock(
+            chapter: chapter,
+            archiveURL: archiveURL,
+            metadata: stored.manifest.pages,
+            pages: pages
+        )
     }
 
-    // Update current page when scrolling
-    override func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        super.scrollViewDidScroll(scrollView)
+    func rebuildLayout() {
+        guard scrollView.bounds.width > 0 else { return }
+        let width = scrollView.bounds.width
+        var y: CGFloat = 0
+        var layouts: [PageLayout] = []
+        for blockIndex in blocks.indices {
+            let start = y
+            for (pageIndex, page) in blocks[blockIndex].metadata.enumerated() {
+                let height = width * CGFloat(page.height) / CGFloat(page.width)
+                let frame = CGRect(x: 0, y: y, width: width, height: height)
+                layouts.append(PageLayout(
+                    key: "\(blocks[blockIndex].chapter.key)\u{1f}\(pageIndex)",
+                    chapterIndex: blockIndex,
+                    pageIndex: pageIndex,
+                    archiveURL: blocks[blockIndex].archiveURL,
+                    path: page.path,
+                    frame: frame
+                ))
+                y += height
+            }
+            blocks[blockIndex].range = start..<y
+        }
+        pageLayouts = layouts
+        canvasView.frame = CGRect(x: 0, y: 0, width: width, height: y)
+        scrollView.contentSize = canvasView.bounds.size
+        updateVisiblePages()
+    }
 
-        isScrolling = true
+    func prepend(_ block: ChapterBlock) {
+        let oldOffset = scrollView.contentOffset.y
+        blocks.insert(block, at: 0)
+        currentChapterIndex += 1
+        rebuildLayout()
+        let insertedHeight = blocks[0].range.upperBound
+        scrollView.contentOffset.y = oldOffset + insertedHeight
+        updateVisiblePages()
+    }
 
-        // ignore if page slider is being used
-        guard !isSliding && !isZooming else { return }
+    func append(_ block: ChapterBlock) {
+        blocks.append(block)
+        rebuildLayout()
+    }
 
-        guard
-            let chapter = chapter,
-            let chapterIndex = chapters.firstIndex(of: chapter)
-        else { return }
+    func chapterProgress(in block: ChapterBlock?) -> CGFloat {
+        guard let block, block.range.upperBound > block.range.lowerBound else { return 0 }
+        let middle = scrollView.contentOffset.y + scrollView.bounds.height / 2
+        return min(1, max(0, (middle - block.range.lowerBound) / (block.range.upperBound - block.range.lowerBound)))
+    }
 
-        let pagePath = getCurrentPagePath()
-        let pageSection = pagePath?.section ?? 0
+    func scrollToProgress(_ progress: CGFloat, blockIndex: Int) {
+        guard let block = blocks[safe: blockIndex] else { return }
+        let middle = block.range.lowerBound + (block.range.upperBound - block.range.lowerBound) * progress
+        let maximum = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+        scrollView.contentOffset.y = min(maximum, max(0, middle - scrollView.bounds.height / 2))
+        updateVisiblePages()
+    }
 
-        if infinite {
-            // check if we need to switch chapters
-            if chapterIndex > 0 && pageSection < chapterIndex {
-                movePreviousChapter()
-                needsInfoRefresh = true
-            } else if chapterIndex < chapters.count - 1 {
-                if pageSection > chapterIndex {
-                    moveNextChapter()
-                    needsInfoRefresh = true
-                }
+    func updateVisiblePages() {
+        guard !pageLayouts.isEmpty else { return }
+        let preload = CGRect(origin: scrollView.contentOffset, size: scrollView.bounds.size)
+            .insetBy(dx: 0, dy: -scrollView.bounds.height * 1.5)
+        let wanted = pageLayouts.filter { $0.frame.intersects(preload) }
+        let wantedKeys = Set(wanted.map(\.key))
+
+        for key in visibleViews.keys where !wantedKeys.contains(key) {
+            guard let imageView = visibleViews.removeValue(forKey: key) else { continue }
+            imageTasks.removeValue(forKey: key)?.cancel()
+            imageView.removeFromSuperview()
+            imageView.image = nil
+            reusePool.append(imageView)
+        }
+        for layout in wanted {
+            if let imageView = visibleViews[layout.key] {
+                imageView.frame = layout.frame
+            } else {
+                show(layout)
             }
         }
+    }
 
-        // update page number
-        let page = getCurrentPage()
-        if previousPage != page {
+    func trimImages(to rect: CGRect) {
+        for (key, imageView) in visibleViews where !imageView.frame.intersects(rect) {
+            imageTasks.removeValue(forKey: key)?.cancel()
+            imageView.image = nil
+        }
+    }
+
+    func show(_ layout: PageLayout) {
+        let imageView = reusePool.popLast() ?? UIImageView()
+        imageView.contentMode = .scaleToFill
+        imageView.clipsToBounds = true
+        imageView.backgroundColor = .black
+        imageView.frame = layout.frame
+        canvasView.addSubview(imageView)
+        visibleViews[layout.key] = imageView
+
+        let targetWidth = max(1, layout.frame.width * UIScreen.main.scale)
+        imageTasks[layout.key] = Task { [weak self, weak imageView] in
+            let image = await Self.loadImage(
+                archiveURL: layout.archiveURL,
+                path: layout.path,
+                targetWidth: targetWidth
+            )
+            guard
+                !Task.isCancelled,
+                let self,
+                self.visibleViews[layout.key] === imageView
+            else { return }
+            imageView?.image = image
+            self.imageTasks[layout.key] = nil
+        }
+    }
+
+    nonisolated static func loadImage(archiveURL: URL, path: String, targetWidth: CGFloat) async -> UIImage? {
+        await Task.detached(priority: .userInitiated) {
+            autoreleasepool {
+                do {
+                    let archive = try Archive(url: archiveURL, accessMode: .read)
+                    guard let entry = archive[path] else { return nil }
+                    var data = Data()
+                    _ = try archive.extract(entry) { data.append($0) }
+                    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+                    let options: [CFString: Any] = [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceShouldCacheImmediately: true,
+                        kCGImageSourceThumbnailMaxPixelSize: Int(targetWidth)
+                    ]
+                    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                        return nil
+                    }
+                    return UIImage(cgImage: image)
+                } catch {
+                    return nil
+                }
+            }
+        }.value
+    }
+}
+
+// MARK: - Scroll view
+extension ReaderWebtoonViewController: UIScrollViewDelegate {
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { canvasView }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateVisiblePages()
+        guard !isSliding, scrollView.zoomScale == 1 else { return }
+        updateReadingPosition()
+        preloadAtEdges()
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        if UserDefaults.standard.bool(forKey: "Reader.hideBarsOnSwipe") {
+            delegate?.hideBars()
+        }
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        updateVisiblePages()
+    }
+
+    private func updateReadingPosition() {
+        let middle = scrollView.contentOffset.y + scrollView.bounds.height / 2
+        guard let blockIndex = blocks.firstIndex(where: { $0.range.contains(middle) }) else { return }
+        if blockIndex != currentChapterIndex {
+            currentChapterIndex = blockIndex
+            let block = blocks[blockIndex]
+            delegate?.setChapter(block.chapter)
+            delegate?.setPages(block.pages)
+        }
+        guard let layout = pageLayouts.first(where: { $0.chapterIndex == blockIndex && $0.frame.contains(CGPoint(x: 1, y: middle)) }) else {
+            return
+        }
+        let page = layout.pageIndex + 1
+        if page != previousPage {
             previousPage = page
             delegate?.setCurrentPage(page, position: nil)
         }
     }
 
-    // disable slider movement while zooming
-    // zooming sometimes causes page count to jitter between two pages
-    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
-        isZooming = true
-    }
-
-    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        isZooming = false
-        scrollViewDidScroll(scrollView)
-    }
-
-    // fix content size when rotating
-    // TODO: fix scroll offset when rotating
-    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
-        super.viewWillTransition(to: size, with: coordinator)
-        coordinator.animate { _ in
-            self.zoomView.adjustContentSize()
-        }
-    }
-}
-
-// MARK: - Context Menu
-extension ReaderWebtoonViewController: UIContextMenuInteractionDelegate {
-    func contextMenuInteraction(
-        _ interaction: UIContextMenuInteraction,
-        configurationForMenuAtLocation location: CGPoint
-    ) -> UIContextMenuConfiguration? {
-        guard
-            case let point = interaction.location(in: collectionNode.view),
-            let indexPath = collectionNode.indexPathForItem(at: point),
-            let node = collectionNode.nodeForItem(at: indexPath) as? ReaderWebtoonPageNode,
-            let image = node.imageNode.image,
-            !UserDefaults.standard.bool(forKey: "Reader.disableQuickActions")
-        else {
-            return nil
-        }
-        // disable when live text highlighting is active
-        if
-            #available(iOS 16.0, *),
-            let imageAnalaysisInteraction = node.imageNode.imageAnalaysisInteraction,
-            imageAnalaysisInteraction.selectableItemsHighlighted
-        {
-            return nil
-        }
-        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil, actionProvider: { [weak self] _ in
-            guard let self else { return nil }
-
-            let shareAction = UIAction(
-                title: NSLocalizedString("SHARE"),
-                image: UIImage(systemName: "square.and.arrow.up")
-            ) { _ in
-                let items = [image]
-                let activityController = UIActivityViewController(activityItems: items, applicationActivities: nil)
-
-                activityController.popoverPresentationController?.sourceView = self.view
-                activityController.popoverPresentationController?.sourceRect = CGRect(origin: location, size: .zero)
-
-                self.present(activityController, animated: true)
+    private func preloadAtEdges() {
+        guard UserDefaults.standard.bool(forKey: "Reader.verticalInfiniteScroll") else { return }
+        let threshold = scrollView.bounds.height * 3
+        if scrollView.contentOffset.y < threshold, !loadingPrevious {
+            loadingPrevious = true
+            Task { [weak self] in
+                guard let self else { return }
+                defer { loadingPrevious = false }
+                guard let chapter = delegate?.getPreviousChapter(), !blocks.contains(where: { $0.chapter == chapter }) else { return }
+                if let block = await loadBlock(chapter: chapter) { prepend(block) }
             }
-
-            let saveToPhotosAction = UIAction(
-                title: NSLocalizedString("SAVE_TO_PHOTOS"),
-                image: UIImage(systemName: "square.and.arrow.down")
-            ) { _ in
-                image.saveToAlbum(viewController: self)
-            }
-
-            let reloadAction = UIAction(
-                title: NSLocalizedString("RELOAD"),
-                image: UIImage(systemName: "arrow.clockwise")
-            ) { _ in
-                Task { @MainActor in
-                    await self.reloadPageImage(for: node)
+        }
+        let remaining = scrollView.contentSize.height - scrollView.bounds.height - scrollView.contentOffset.y
+        if remaining < threshold, !loadingNext {
+            loadingNext = true
+            Task { [weak self] in
+                guard let self else { return }
+                defer { loadingNext = false }
+                guard let chapter = delegate?.getNextChapter(), !blocks.contains(where: { $0.chapter == chapter }) else {
+                    if delegate?.getNextChapter() == nil { delegate?.setCompleted() }
+                    return
                 }
-            }
-
-            return UIMenu(title: "", children: [shareAction, saveToPhotosAction, reloadAction])
-        })
-    }
-
-    /// Reloads the page image for the given webtoon page node
-    @MainActor
-    private func reloadPageImage(for node: ReaderWebtoonPageNode) async {
-        let success = await node.reloadCurrentImage()
-        if !success {
-            // Show error feedback if reload failed
-            showReloadError()
-        }
-    }
-
-    /// Shows an error message when image reload fails
-    private func showReloadError() {
-        let alert = UIAlertController(
-            title: NSLocalizedString("RELOAD_FAILED"),
-            message: NSLocalizedString("RELOAD_FAILED_TEXT"),
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: NSLocalizedString("OK"), style: .default))
-        present(alert, animated: true)
-    }
-}
-
-// MARK: - Infinite Scroll
-extension ReaderWebtoonViewController {
-
-    // check for infinite load when deceleration stops
-    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if UserDefaults.standard.bool(forKey: "Reader.hideBarsOnSwipe") {
-            delegate?.hideBars()
-        }
-
-        guard !decelerate else {
-            return
-        }
-        setLiveTextButtonHidden(false)
-
-        if infinite {
-            isScrolling = false
-            checkInfiniteLoad()
-        }
-    }
-
-    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        setLiveTextButtonHidden(false)
-        if infinite {
-            isScrolling = false
-            checkInfiniteLoad()
-        }
-    }
-
-    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-        setLiveTextButtonHidden(false)
-        if infinite {
-            isScrolling = false
-            checkInfiniteLoad()
-        }
-    }
-
-    // check if at the top or bottom to append the next/prev chapter
-    func checkInfiniteLoad() {
-        // prepend previous chapter
-        if !loadingPrevious {
-            let topPath = getCurrentPagePath(pos: .top)
-            if topPath == nil || (topPath?.section == 0 && topPath?.row == 0) {
-                loadingPrevious = true
-                Task {
-                    await prependPreviousChapter()
-                    loadingPrevious = false
-                }
-            }
-        }
-        if !loadingNext {
-            let bottomPath = getCurrentPagePath(pos: .bottom)
-            // append next chapter
-            if bottomPath == nil || (bottomPath?.section == pages.count - 1 && bottomPath?.item == pages[pages.count - 1].count - 1) {
-                loadingNext = true
-                delegate?.setCompleted()
-                Task {
-                    await appendNextChapter()
-                    loadingNext = false
-                }
-            }
-        }
-    }
-
-    /// Prepend the previous chapter's pages
-    func prependPreviousChapter() async {
-        guard let prevChapter = delegate?.getPreviousChapter() else { return }
-        await viewModel.preload(chapter: prevChapter)
-
-        // check if pages failed to load
-        if viewModel.preloadedPages.isEmpty {
-            return
-        }
-
-        // wait until zooming and scrolling stops
-        while isZooming || isScrolling {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-
-        // queue remove last section if we have three already
-//        let removeLast = chapters.count >= 3
-
-        chapters.insert(prevChapter, at: 0)
-        pages.insert(
-            [Page(
-                type: .prevInfoPage,
-                sourceId: LocalSourceRunner.sourceKey,
-                chapterId: prevChapter.key,
-                index: -1
-            )]  + viewModel.preloadedPages,
-            at: 0
-        )
-
-        let layout = collectionNode.collectionViewLayout as? VerticalContentOffsetPreservingLayout
-        layout?.isInsertingCellsAbove = true
-
-        // disable animations and adjust offset before re-enabling
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        CATransaction.setAnimationDuration(0)
-        await collectionNode.performBatch(animated: false) {
-            collectionNode.insertSections(IndexSet(integer: 0))
-        }
-//        if removeLast {
-//            chapters.removeLast()
-//            pages.removeLast()
-//
-//            // remove last section
-//            await collectionNode.performBatchUpdates {
-//                self.collectionNode.deleteSections(IndexSet(integer: self.pages.count - 1))
-//            }
-//        }
-        self.scrollView.contentOffset = self.collectionNode.contentOffset
-        self.zoomView.adjustContentSize()
-        CATransaction.commit()
-    }
-
-    /// Append the next chapter's pages
-    func appendNextChapter() async {
-        guard let nextChapter = delegate?.getNextChapter() else { return }
-        await viewModel.preload(chapter: nextChapter)
-
-        // check if pages failed to load
-        if viewModel.preloadedPages.isEmpty {
-            return
-        }
-
-        // wait until zooming and scrolling stops
-        while isZooming || isScrolling {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-
-        // queue remove first section if we have three already
-//        let removeFirst = chapters.count >= 3
-
-        chapters.append(nextChapter)
-        pages.append(viewModel.preloadedPages + [Page(
-            type: .nextInfoPage,
-            sourceId: LocalSourceRunner.sourceKey,
-            chapterId: nextChapter.id,
-            index: -2
-        )])
-
-        // disable animations and adjust offset before re-enabling
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        CATransaction.setAnimationDuration(0)
-        await collectionNode.performBatch(animated: false) {
-            collectionNode.insertSections(IndexSet(integer: pages.count - 1))
-        }
-//        if removeFirst {
-//            chapters.removeFirst()
-//            pages.removeFirst()
-//            await collectionNode.performBatchUpdates {
-//                collectionNode.deleteSections(IndexSet(integer: 0))
-//            }
-//        }
-        scrollView.contentOffset = self.collectionNode.contentOffset
-        zoomView.adjustContentSize()
-        CATransaction.commit()
-    }
-
-    /// Switch current chapter to previous
-    func movePreviousChapter() {
-        guard
-            let currChapter = chapter,
-            let chapterIndex = chapters.firstIndex(of: currChapter),
-            let chapter = chapters[safe: chapterIndex - 1],
-            let pages = pages[safe: chapterIndex - 1]
-        else { return }
-        self.chapter = chapter
-        delegate?.setChapter(chapter)
-        delegate?.setPages(pages.filter({ $0.type == .imagePage }))
-        viewModel.setPages(chapter: chapter, pages: pages)
-    }
-
-    /// Switch current chapter to next
-    func moveNextChapter() {
-        guard
-            let currChapter = chapter,
-            let chapterIndex = chapters.firstIndex(of: currChapter),
-            let chapter = chapters[safe: chapterIndex + 1],
-            let pages = pages[safe: chapterIndex + 1]
-        else { return }
-        self.chapter = chapter
-        delegate?.setChapter(chapter)
-        delegate?.setPages(pages.filter({ $0.type == .imagePage }))
-        viewModel.setPages(chapter: chapter, pages: pages)
-    }
-
-    /// Refresh info page chapter info
-    func refreshInfoPages() {
-        let paths = pages.enumerated().flatMap { section, pages in
-            pages.enumerated().compactMap { item, page in
-                if page.type != .imagePage {
-                    return IndexPath(item: item, section: section)
-                } else {
-                    return nil
-                }
-            }
-        }
-        collectionNode.performBatchUpdates {
-            collectionNode.reloadItems(at: paths)
-        } completion: { finished in
-            if finished {
-                Task { @MainActor in
-                    self.zoomView.adjustContentSize()
-                }
+                if let block = await loadBlock(chapter: chapter) { append(block) }
             }
         }
     }
 }
 
-// MARK: - Reader Delegate
+// MARK: - Reader delegate
 extension ReaderWebtoonViewController: ReaderReaderDelegate {
-    func moveLeft() {
-        let offset = CGPoint(
-            x: collectionNode.contentOffset.x,
-            y: max(
-                0,
-                collectionNode.contentOffset.y - collectionNode.bounds.height * 2/3
-            )
-        )
-        scrollView.setContentOffset(
-            offset,
-            animated: UserDefaults.standard.bool(forKey: "Reader.animatePageTransitions")
-        )
-    }
+    func moveLeft() { moveViewport(by: -scrollView.bounds.height * 2 / 3) }
+    func moveRight() { moveViewport(by: scrollView.bounds.height * 2 / 3) }
 
-    func moveRight() {
-        let offset = CGPoint(
-            x: collectionNode.contentOffset.x,
-            y: min(
-                scrollView.contentSize.height - scrollView.bounds.height,
-                collectionNode.contentOffset.y + collectionNode.bounds.height * 2/3
-            )
-        )
-        scrollView.setContentOffset(
-            offset,
-            animated: UserDefaults.standard.bool(forKey: "Reader.animatePageTransitions")
-        )
+    private func moveViewport(by amount: CGFloat) {
+        let maximum = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+        let offset = CGPoint(x: 0, y: min(maximum, max(0, scrollView.contentOffset.y + amount)))
+        scrollView.setContentOffset(offset, animated: UserDefaults.standard.bool(forKey: "Reader.animatePageTransitions"))
     }
 
     func sliderMoved(value: CGFloat) {
         isSliding = true
-
-        // get slider area
-        guard
-            let chapter = chapter,
-            let chapterIndex = chapters.firstIndex(of: chapter),
-            let layout = self.collectionNode.collectionViewLayout as? VerticalContentOffsetPreservingLayout,
-            let currentPages = pages[safe: chapterIndex]
-        else { return }
-
-        var offset: CGFloat = 0
-        for idx in 0..<chapterIndex {
-            offset += layout.getHeightFor(section: idx)
-        }
-
-        let hasStartInfo = currentPages.first?.type != .imagePage
-        let hasEndInfo = currentPages.last?.type != .imagePage
-
-        if hasStartInfo {
-            offset += layout.getHeightFor(section: chapterIndex, range: 0..<1)
-        }
-
-        let height = layout.getHeightFor(
-            section: chapterIndex,
-            range: (hasStartInfo ? 1 : 0)..<currentPages.count - (hasEndInfo ? 1 : 0)
-        ) - collectionNode.bounds.height
-
-        scrollView.setContentOffset(
-            CGPoint(x: collectionNode.contentOffset.x, y: offset + height * value),
-            animated: false
-        )
-
-        let page = getCurrentPage()
+        guard let block = blocks[safe: currentChapterIndex] else { return }
+        let maximum = max(block.range.lowerBound, block.range.upperBound - scrollView.bounds.height)
+        scrollView.contentOffset.y = block.range.lowerBound + (maximum - block.range.lowerBound) * value
+        let page = pageAtViewportMiddle(in: currentChapterIndex)
         delegate?.displayPage(page)
     }
 
     func sliderStopped(value: CGFloat) {
         isSliding = false
-        scrollViewDidScroll(collectionNode.view)
+        updateReadingPosition()
     }
 
     func setChapter(_ chapter: AidokuRunner.Chapter, startPage: Int) {
-        self.chapter = chapter
-        chapters = [chapter]
-
-        Task {
-            await viewModel.loadPages(chapter: chapter)
-            delegate?.setPages(viewModel.pages)
-            if viewModel.pages.isEmpty {
-                pages = []
-                await collectionNode.reloadData()
-                return
+        initialStartPage = max(1, startPage)
+        imageTasks.values.forEach { $0.cancel() }
+        imageTasks.removeAll()
+        visibleViews.values.forEach { $0.removeFromSuperview() }
+        visibleViews.removeAll()
+        blocks.removeAll()
+        pageLayouts.removeAll()
+        Task { [weak self] in
+            guard let self, let block = await loadBlock(chapter: chapter) else { return }
+            var loadedBlocks = [block]
+            if UserDefaults.standard.bool(forKey: "Reader.verticalInfiniteScroll") {
+                if let previous = delegate?.getPreviousChapter(), let previousBlock = await loadBlock(chapter: previous) {
+                    loadedBlocks.insert(previousBlock, at: 0)
+                }
+                if let next = delegate?.getNextChapter(), let nextBlock = await loadBlock(chapter: next) {
+                    loadedBlocks.append(nextBlock)
+                }
             }
-            let sourceId = LocalSourceRunner.sourceKey
-            pages = [[
-                Page(
-                    type: .prevInfoPage,
-                    sourceId: sourceId,
-                    chapterId: chapter.key,
-                    index: -1
-                )
-            ] + viewModel.pages + [
-                Page(
-                    type: .nextInfoPage,
-                    sourceId: sourceId,
-                    chapterId: chapter.key,
-                    index: -2
-                )
-            ]]
-
-            var startPage = startPage
-            if startPage < 1 {
-                startPage = 1
-            } else if startPage > viewModel.pages.count {
-                startPage = viewModel.pages.count
+            blocks = loadedBlocks
+            currentChapterIndex = blocks.firstIndex(where: { $0.chapter == chapter }) ?? 0
+            rebuildLayout()
+            delegate?.setPages(block.pages)
+            let pageIndex = min(max(0, initialStartPage - 1), block.metadata.count - 1)
+            if let layout = pageLayouts.first(where: {
+                $0.chapterIndex == currentChapterIndex && $0.pageIndex == pageIndex
+            }) {
+                scrollView.contentOffset.y = layout.frame.minY
             }
-
-            await collectionNode.reloadData()
-            zoomView.adjustContentSize()
-
-            // scroll to first page
-            collectionNode.scrollToItem(
-                at: IndexPath(row: startPage, section: 0),
-                at: .top,
-                animated: false
-            )
-            scrollView.contentOffset = collectionNode.contentOffset
+            updateVisiblePages()
+            preloadAtEdges()
         }
     }
-}
 
-// MARK: - Collection View Delegate
-extension ReaderWebtoonViewController: ASCollectionDelegate {
-
-    // Refresh info pages after they move off screen
-    func collectionNode(_ collectionNode: ASCollectionNode, didEndDisplayingItemWith node: ASCellNode) {
-        guard needsInfoRefresh else { return }
-        if node is ReaderWebtoonTransitionNode {
-            needsInfoRefresh = false
-            refreshInfoPages()
-        }
-    }
-}
-
-// MARK: - Data Source
-extension ReaderWebtoonViewController: ASCollectionDataSource {
-
-    func numberOfSections(in collectionNode: ASCollectionNode) -> Int {
-        pages.count
-    }
-
-    func collectionNode(
-        _ collectionNode: ASCollectionNode,
-        numberOfItemsInSection section: Int
-    ) -> Int {
-        pages[section].count
-    }
-
-    func collectionNode(
-        _ collectionNode: ASCollectionNode,
-        nodeBlockForItemAt indexPath: IndexPath
-    ) -> ASCellNodeBlock {
-        guard let chapter else { return { ASCellNode() } }
-        var page = pages[indexPath.section][indexPath.item]
-        if page.type == .imagePage {
-            // image page
-            return { [weak self] in
-                guard let self else { return ASCellNode() }
-                let cell = ReaderWebtoonPageNode(source: nil, page: page)
-                cell.delegate = self
-                return cell
-            }
-        } else {
-            // transition page
-            let chapterIndex = chapters.firstIndex(of: chapter) ?? 0
-
-            // determine page type
-            if (indexPath.section == chapterIndex && indexPath.item == 0)
-                || (indexPath.section == chapterIndex - 1 && indexPath.item > 0) {
-                page.type = .prevInfoPage
-            } else {
-                page.type = .nextInfoPage
-            }
-
-            let to = page.type == .prevInfoPage
-                ? self.delegate?.getPreviousChapter()
-                : self.delegate?.getNextChapter()
-            return { [weak self] in
-                guard let self else { return ASCellNode() }
-                return ReaderWebtoonTransitionNode(transition: .init(
-                    type: page.type == .prevInfoPage ? .prev : .next,
-                    from: chapter.toOld(
-                        sourceId: LocalSourceRunner.sourceKey,
-                        mangaId: self.viewModel.manga.key
-                    ),
-                    to: to?.toOld(
-                        sourceId: LocalSourceRunner.sourceKey,
-                        mangaId: self.viewModel.manga.key
-                    )
-                ))
-            }
-        }
+    private func pageAtViewportMiddle(in chapterIndex: Int) -> Int {
+        let middle = scrollView.contentOffset.y + scrollView.bounds.height / 2
+        return (pageLayouts.first { $0.chapterIndex == chapterIndex && $0.frame.contains(CGPoint(x: 1, y: middle)) }?.pageIndex ?? 0) + 1
     }
 }

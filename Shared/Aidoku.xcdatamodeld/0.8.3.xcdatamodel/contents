@@ -7,6 +7,21 @@
         <attribute name="title" attributeType="String" defaultValueString=""/>
         <relationship name="libraryObjects" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="LibraryManga" inverseName="categories" inverseEntity="LibraryManga"/>
     </entity>
+    <entity name="ArchiveManifest" representedClassName="ArchiveManifestObject" syncable="YES">
+        <attribute name="archiveFileSize" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="archiveModifiedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="archivePath" attributeType="String" defaultValueString=""/>
+        <attribute name="chapterId" attributeType="String" defaultValueString=""/>
+        <attribute name="key" attributeType="String" defaultValueString=""/>
+        <attribute name="manifestVersion" attributeType="Integer 16" defaultValueString="1" usesScalarValueType="YES"/>
+        <attribute name="mangaId" attributeType="String" defaultValueString=""/>
+        <attribute name="pagesData" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
+        <uniquenessConstraints>
+            <uniquenessConstraint>
+                <constraint value="key"/>
+            </uniquenessConstraint>
+        </uniquenessConstraints>
+    </entity>
     <entity name="Chapter" representedClassName="ChapterObject" syncable="YES">
         <attribute name="chapter" optional="YES" attributeType="Float" defaultValueString="-1" usesScalarValueType="YES"/>
         <attribute name="dateUploaded" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
@@ -123,6 +138,7 @@
         <memberEntity name="ReadingSession"/>
     </configuration>
     <configuration name="Local">
+        <memberEntity name="ArchiveManifest"/>
         <memberEntity name="Source"/>
     </configuration>
 </model>

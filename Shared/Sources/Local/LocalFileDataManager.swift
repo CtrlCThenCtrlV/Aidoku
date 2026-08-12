@@ -27,6 +27,23 @@ final actor LocalFileDataManager {
 
 // MARK: Checking
 extension LocalFileDataManager {
+    func fetchArchiveManifest(mangaId: String, chapterId: String) -> StoredArchiveManifest? {
+        let request = ArchiveManifestObject.fetchRequest()
+        request.predicate = NSPredicate(format: "key == %@", manifestKey(mangaId: mangaId, chapterId: chapterId))
+        request.fetchLimit = 1
+        guard
+            let object = try? context.fetch(request).first,
+            object.manifestVersion == ArchiveChapterManifest.version,
+            let manifest = try? ArchiveChapterManifest.decode(object.pagesData)
+        else { return nil }
+        return StoredArchiveManifest(
+            archivePath: object.archivePath,
+            modifiedAt: object.archiveModifiedAt,
+            fileSize: object.archiveFileSize,
+            manifest: manifest
+        )
+    }
+
     // check if a series exists in the db with the given name (id)
     func hasSeries(id: String) -> Bool {
         let request = MangaObject.fetchRequest()
@@ -219,11 +236,15 @@ extension LocalFileDataManager {
             try? context.save()
         }
 
+        if mangaPath != nil {
+            removeArchiveManifests(mangaId: mangaId)
+        }
         return mangaPath
     }
 
     // remove a chapter object from the db
     func removeChapter(mangaId: String, chapterId: String) -> String? {
+        removeArchiveManifest(mangaId: mangaId, chapterId: chapterId)
         let request = ChapterObject.fetchRequest()
         request.predicate = NSPredicate(
             format: "id == %@ AND mangaId == %@ AND sourceId == %@",
@@ -289,6 +310,7 @@ extension LocalFileDataManager {
             return !availableChapters.contains(fileName)
         }
         for chapter in chaptersToRemove {
+            removeArchiveManifest(mangaId: mangaId, chapterId: chapter.id)
             self.context.delete(chapter)
         }
 
@@ -307,6 +329,36 @@ extension LocalFileDataManager {
 
 // MARK: Creating
 extension LocalFileDataManager {
+    func saveArchiveManifest(
+        mangaId: String,
+        chapterId: String,
+        archiveURL: URL,
+        manifest: ArchiveChapterManifest
+    ) throws {
+        let key = manifestKey(mangaId: mangaId, chapterId: chapterId)
+        let request = ArchiveManifestObject.fetchRequest()
+        request.predicate = NSPredicate(format: "key == %@", key)
+        request.fetchLimit = 1
+        let object = try context.fetch(request).first ?? ArchiveManifestObject(context: context)
+        let values = try archiveURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        object.key = key
+        object.mangaId = mangaId
+        object.chapterId = chapterId
+        object.archivePath = removeDocumentsDirPrefix(from: archiveURL)
+        object.archiveModifiedAt = values.contentModificationDate ?? .distantPast
+        object.archiveFileSize = Int64(values.fileSize ?? 0)
+        object.manifestVersion = ArchiveChapterManifest.version
+        object.pagesData = try manifest.encoded()
+        try context.save()
+    }
+
+    func removeAllArchiveManifests() {
+        let request = ArchiveManifestObject.fetchRequest()
+        guard let objects = try? context.fetch(request) else { return }
+        objects.forEach(context.delete)
+        try? context.save()
+    }
+
     func createManga(
         url: URL,
         id: String,
@@ -364,11 +416,11 @@ extension LocalFileDataManager {
         volume: Float? = nil,
         chapter: Float? = nil,
         comicInfo: ComicInfo? = nil
-    ) {
+    ) -> Bool {
         let request = MangaObject.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@ AND sourceId == %@", mangaId, LocalSourceRunner.sourceKey)
         request.fetchLimit = 1
-        guard let mangaObject = (try? context.fetch(request))?.first else { return }
+        guard let mangaObject = (try? context.fetch(request))?.first else { return false }
 
         // create chapter in db
         let fileInfo = LocalFileInfoObject(context: self.context)
@@ -410,12 +462,39 @@ extension LocalFileDataManager {
 
         mangaObject.addToChapters(chapterObject)
 
-        try? context.save()
+        do {
+            try context.save()
+            return true
+        } catch {
+            context.rollback()
+            LogManager.logger.error("Failed to create local chapter: \(error)")
+            return false
+        }
     }
 }
 
 // MARK: Miscellaneous
 extension LocalFileDataManager {
+    private func manifestKey(mangaId: String, chapterId: String) -> String {
+        "\(mangaId)\u{1f}\(chapterId)"
+    }
+
+    private func removeArchiveManifest(mangaId: String, chapterId: String) {
+        let request = ArchiveManifestObject.fetchRequest()
+        request.predicate = NSPredicate(format: "key == %@", manifestKey(mangaId: mangaId, chapterId: chapterId))
+        guard let objects = try? context.fetch(request) else { return }
+        objects.forEach(context.delete)
+        try? context.save()
+    }
+
+    private func removeArchiveManifests(mangaId: String) {
+        let request = ArchiveManifestObject.fetchRequest()
+        request.predicate = NSPredicate(format: "mangaId == %@", mangaId)
+        guard let objects = try? context.fetch(request) else { return }
+        objects.forEach(context.delete)
+        try? context.save()
+    }
+
     // finds manga in db but not on disk and manga on disk but not in db, and fix broken manga covers
     func findMangaDiskChanges(mangaFolders: [URL]) -> (toRemove: Set<String>, toAdd: Set<String>) {
         let folderMangaIds = Set(mangaFolders.map { $0.lastPathComponent.normalized })
