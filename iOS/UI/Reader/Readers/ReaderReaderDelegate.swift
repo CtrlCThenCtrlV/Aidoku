@@ -17,5 +17,6 @@ protocol ReaderReaderDelegate: UIViewController {
     func moveRight()
     func sliderMoved(value: CGFloat)
     func sliderStopped(value: CGFloat)
+    func handleDoubleTap(at point: CGPoint)
     func setChapter(_ chapter: AidokuRunner.Chapter, startPage: Int)
 }

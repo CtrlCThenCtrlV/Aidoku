@@ -75,7 +75,7 @@ class ReaderViewController: BaseObservingViewController {
 
     // fake zoom gesture so that the bar toggle gesture doesn't conflict with zooming
     private lazy var fakeZoomTapGesture: UITapGestureRecognizer = {
-        let doubleTap = UITapGestureRecognizer(target: self, action: nil)
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         return doubleTap
     }()
@@ -762,6 +762,10 @@ extension ReaderViewController {
         } else {
             toggleBarVisibility()
         }
+    }
+
+    @objc private func handleDoubleTap(_ gestureRecognizer: UITapGestureRecognizer) {
+        reader?.handleDoubleTap(at: gestureRecognizer.location(in: view))
     }
 }
 

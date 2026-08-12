@@ -32,6 +32,8 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
         let pageIndex: Int
         let archiveURL: URL
         let path: String
+        let pixelWidth: Int
+        let pixelHeight: Int
         let frame: CGRect
     }
 
@@ -39,6 +41,7 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
     private var pageLayouts: [PageLayout] = []
     private var visibleViews: [String: UIImageView] = [:]
     private var imageTasks: [String: Task<Void, Never>] = [:]
+    private var imageScales: [String: CGFloat] = [:]
     private var reusePool: [UIImageView] = []
     private var currentChapterIndex = 0
     private var previousPage = 0
@@ -47,6 +50,8 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
     private var loadingNext = false
     private var initialStartPage = 1
     private var lastLayoutWidth: CGFloat = 0
+    private var isPinchZooming = false
+    private var isDoubleTapZooming = false
 
     init(manga: AidokuRunner.Manga) {
         self.manga = manga
@@ -147,6 +152,8 @@ private extension ReaderWebtoonViewController {
                     pageIndex: pageIndex,
                     archiveURL: blocks[blockIndex].archiveURL,
                     path: page.path,
+                    pixelWidth: page.width,
+                    pixelHeight: page.height,
                     frame: frame
                 ))
                 y += height
@@ -188,10 +195,10 @@ private extension ReaderWebtoonViewController {
         updateVisiblePages()
     }
 
-    func updateVisiblePages() {
+    func updateVisiblePages(loadAtCurrentScale: Bool = true) {
         guard !pageLayouts.isEmpty else { return }
-        let preload = CGRect(origin: scrollView.contentOffset, size: scrollView.bounds.size)
-            .insetBy(dx: 0, dy: -scrollView.bounds.height * 1.5)
+        let viewport = scrollView.convert(scrollView.bounds, to: canvasView)
+        let preload = viewport.insetBy(dx: 0, dy: -viewport.height * 1.5)
         let wanted = pageLayouts.filter { $0.frame.intersects(preload) }
         let wantedKeys = Set(wanted.map(\.key))
 
@@ -200,11 +207,15 @@ private extension ReaderWebtoonViewController {
             imageTasks.removeValue(forKey: key)?.cancel()
             imageView.removeFromSuperview()
             imageView.image = nil
+            imageScales[key] = nil
             reusePool.append(imageView)
         }
         for layout in wanted {
             if let imageView = visibleViews[layout.key] {
                 imageView.frame = layout.frame
+                if loadAtCurrentScale {
+                    loadImage(for: layout, into: imageView, scale: scrollView.zoomScale)
+                }
             } else {
                 show(layout)
             }
@@ -212,9 +223,11 @@ private extension ReaderWebtoonViewController {
     }
 
     func trimImages(to rect: CGRect) {
+        let rect = scrollView.convert(rect, to: canvasView)
         for (key, imageView) in visibleViews where !imageView.frame.intersects(rect) {
             imageTasks.removeValue(forKey: key)?.cancel()
             imageView.image = nil
+            imageScales[key] = nil
         }
     }
 
@@ -227,24 +240,48 @@ private extension ReaderWebtoonViewController {
         canvasView.addSubview(imageView)
         visibleViews[layout.key] = imageView
 
-        let targetWidth = max(1, layout.frame.width * UIScreen.main.scale)
+        loadImage(for: layout, into: imageView, scale: scrollView.zoomScale)
+    }
+
+    private func loadImage(for layout: PageLayout, into imageView: UIImageView, scale: CGFloat) {
+        let scale = max(1, scale)
+        guard imageScales[layout.key, default: 0] + 0.01 < scale, imageTasks[layout.key] == nil else { return }
+        let targetWidth = min(
+            CGFloat(layout.pixelWidth),
+            max(1, layout.frame.width * UIScreen.main.scale * scale)
+        )
+        let targetLongestDimension = targetWidth * max(
+            1,
+            CGFloat(layout.pixelHeight) / CGFloat(layout.pixelWidth)
+        )
         imageTasks[layout.key] = Task { [weak self, weak imageView] in
             let image = await Self.loadImage(
                 archiveURL: layout.archiveURL,
                 path: layout.path,
-                targetWidth: targetWidth
+                targetLongestDimension: targetLongestDimension
             )
             guard
                 !Task.isCancelled,
                 let self,
+                let image,
                 self.visibleViews[layout.key] === imageView
-            else { return }
+            else {
+                if !Task.isCancelled {
+                    self?.imageTasks[layout.key] = nil
+                }
+                return
+            }
             imageView?.image = image
+            self.imageScales[layout.key] = scale
             self.imageTasks[layout.key] = nil
         }
     }
 
-    nonisolated static func loadImage(archiveURL: URL, path: String, targetWidth: CGFloat) async -> UIImage? {
+    nonisolated static func loadImage(
+        archiveURL: URL,
+        path: String,
+        targetLongestDimension: CGFloat
+    ) async -> UIImage? {
         await Task.detached(priority: .userInitiated) {
             autoreleasepool {
                 do {
@@ -257,7 +294,7 @@ private extension ReaderWebtoonViewController {
                         kCGImageSourceCreateThumbnailFromImageAlways: true,
                         kCGImageSourceCreateThumbnailWithTransform: true,
                         kCGImageSourceShouldCacheImmediately: true,
-                        kCGImageSourceThumbnailMaxPixelSize: Int(targetWidth)
+                        kCGImageSourceThumbnailMaxPixelSize: Int(ceil(targetLongestDimension))
                     ]
                     guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
                         return nil
@@ -276,7 +313,7 @@ extension ReaderWebtoonViewController: UIScrollViewDelegate {
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { canvasView }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        updateVisiblePages()
+        updateVisiblePages(loadAtCurrentScale: !isPinchZooming && !isDoubleTapZooming)
         guard !isSliding, scrollView.zoomScale == 1 else { return }
         updateReadingPosition()
         preloadAtEdges()
@@ -289,7 +326,16 @@ extension ReaderWebtoonViewController: UIScrollViewDelegate {
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
-        updateVisiblePages()
+        updateVisiblePages(loadAtCurrentScale: false)
+    }
+
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        isPinchZooming = true
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        isPinchZooming = false
+        reloadVisibleImagesForCurrentScale()
     }
 
     private func updateReadingPosition() {
@@ -364,10 +410,40 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
         updateReadingPosition()
     }
 
+    func handleDoubleTap(at point: CGPoint) {
+        guard !isPinchZooming else { return }
+        isDoubleTapZooming = true
+        if scrollView.zoomScale > 1 {
+            scrollView.setZoomScale(1, animated: true)
+        } else {
+            let targetScale: CGFloat = 2
+            let point = canvasView.convert(point, from: view)
+            let size = CGSize(
+                width: scrollView.bounds.width / targetScale,
+                height: scrollView.bounds.height / targetScale
+            )
+            scrollView.zoom(
+                to: CGRect(
+                    x: point.x - size.width / 2,
+                    y: point.y - size.height / 2,
+                    width: size.width,
+                    height: size.height
+                ),
+                animated: true
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            self.isDoubleTapZooming = false
+            self.reloadVisibleImagesForCurrentScale()
+        }
+    }
+
     func setChapter(_ chapter: AidokuRunner.Chapter, startPage: Int) {
         initialStartPage = max(1, startPage)
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
+        imageScales.removeAll()
         visibleViews.values.forEach { $0.removeFromSuperview() }
         visibleViews.removeAll()
         blocks.removeAll()
@@ -394,6 +470,8 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
                 scrollView.contentOffset.y = layout.frame.minY
             }
             updateVisiblePages()
+            previousPage = pageIndex + 1
+            delegate?.setCurrentPage(pageIndex + 1, position: nil)
             preloadAtEdges()
         }
     }
@@ -401,5 +479,12 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
     private func pageAtViewportMiddle(in chapterIndex: Int) -> Int {
         let middle = scrollView.contentOffset.y + scrollView.bounds.height / 2
         return (pageLayouts.first { $0.chapterIndex == chapterIndex && $0.frame.contains(CGPoint(x: 1, y: middle)) }?.pageIndex ?? 0) + 1
+    }
+
+    private func reloadVisibleImagesForCurrentScale() {
+        for key in visibleViews.keys {
+            imageTasks.removeValue(forKey: key)?.cancel()
+        }
+        updateVisiblePages()
     }
 }
