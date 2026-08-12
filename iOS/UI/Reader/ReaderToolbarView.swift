@@ -18,10 +18,16 @@ class ReaderToolbarView: UIView {
         }
     }
     var currentPage: Int? {
-        didSet { updatePageLabels() }
+        didSet {
+            updatePageLabels()
+            updateSliderPosition()
+        }
     }
     var totalPages: Int? {
-        didSet { updatePageLabels() }
+        didSet {
+            updatePageLabels()
+            updateSliderPosition()
+        }
     }
 
     let sliderView = ReaderSliderView()

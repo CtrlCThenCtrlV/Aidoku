@@ -144,6 +144,7 @@ class ReaderSliderView: UIControl {
     }
 
     override func layoutSubviews() {
+        super.layoutSubviews()
         updateLayerFrames()
     }
 
