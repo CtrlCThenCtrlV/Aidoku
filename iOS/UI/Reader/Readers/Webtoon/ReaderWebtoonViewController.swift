@@ -108,7 +108,7 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
 
 // MARK: - Loading and layout
 private extension ReaderWebtoonViewController {
-    func loadBlock(chapter: AidokuRunner.Chapter) async -> ChapterBlock? {
+    private func loadBlock(chapter: AidokuRunner.Chapter) async -> ChapterBlock? {
         guard
             let stored = await LocalFileManager.shared.fetchManifest(mangaId: manga.key, chapterId: chapter.key),
             !stored.manifest.pages.isEmpty
@@ -159,7 +159,7 @@ private extension ReaderWebtoonViewController {
         updateVisiblePages()
     }
 
-    func prepend(_ block: ChapterBlock) {
+    private func prepend(_ block: ChapterBlock) {
         let oldOffset = scrollView.contentOffset.y
         blocks.insert(block, at: 0)
         currentChapterIndex += 1
@@ -169,12 +169,12 @@ private extension ReaderWebtoonViewController {
         updateVisiblePages()
     }
 
-    func append(_ block: ChapterBlock) {
+    private func append(_ block: ChapterBlock) {
         blocks.append(block)
         rebuildLayout()
     }
 
-    func chapterProgress(in block: ChapterBlock?) -> CGFloat {
+    private func chapterProgress(in block: ChapterBlock?) -> CGFloat {
         guard let block, block.range.upperBound > block.range.lowerBound else { return 0 }
         let middle = scrollView.contentOffset.y + scrollView.bounds.height / 2
         return min(1, max(0, (middle - block.range.lowerBound) / (block.range.upperBound - block.range.lowerBound)))
@@ -218,7 +218,7 @@ private extension ReaderWebtoonViewController {
         }
     }
 
-    func show(_ layout: PageLayout) {
+    private func show(_ layout: PageLayout) {
         let imageView = reusePool.popLast() ?? UIImageView()
         imageView.contentMode = .scaleToFill
         imageView.clipsToBounds = true
@@ -389,7 +389,7 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
             delegate?.setPages(block.pages)
             let pageIndex = min(max(0, initialStartPage - 1), block.metadata.count - 1)
             if let layout = pageLayouts.first(where: {
-                $0.chapterIndex == currentChapterIndex && $0.pageIndex == pageIndex
+                $0.chapterIndex == self.currentChapterIndex && $0.pageIndex == pageIndex
             }) {
                 scrollView.contentOffset.y = layout.frame.minY
             }
