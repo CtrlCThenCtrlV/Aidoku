@@ -413,7 +413,6 @@
 		FB7C28912E898D95009FF6AF /* BackupContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7C28902E898D94009FF6AF /* BackupContentView.swift */; };
 		FB7C28932E898DD9009FF6AF /* BackupCreateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7C28922E898DD8009FF6AF /* BackupCreateView.swift */; };
 		FB7E441D2F0AB02B005EBCA0 /* InterfaceOrientationsViewModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7E441C2F0AB02B005EBCA0 /* InterfaceOrientationsViewModifier.swift */; };
-		FB7F05F42DDCCF4A0036B116 /* ReaderPageDescriptionButtonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7F05F32DDCCF4A0036B116 /* ReaderPageDescriptionButtonView.swift */; };
 		FB7F05F62DDCDC910036B116 /* HostingNode.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7F05F52DDCDC900036B116 /* HostingNode.swift */; };
 		FB7F05F82DDD6CA60036B116 /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7F05F72DDD6CA30036B116 /* MarkdownView.swift */; };
 		FB7F05FA2DDE76450036B116 /* WKWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB7F05F92DDE76430036B116 /* WKWebView.swift */; };
@@ -908,7 +907,6 @@
 		FB7C28902E898D94009FF6AF /* BackupContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupContentView.swift; sourceTree = "<group>"; };
 		FB7C28922E898DD8009FF6AF /* BackupCreateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupCreateView.swift; sourceTree = "<group>"; };
 		FB7E441C2F0AB02B005EBCA0 /* InterfaceOrientationsViewModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InterfaceOrientationsViewModifier.swift; sourceTree = "<group>"; };
-		FB7F05F32DDCCF4A0036B116 /* ReaderPageDescriptionButtonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderPageDescriptionButtonView.swift; sourceTree = "<group>"; };
 		FB7F05F52DDCDC900036B116 /* HostingNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostingNode.swift; sourceTree = "<group>"; };
 		FB7F05F72DDD6CA30036B116 /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
 		FB7F05F92DDE76430036B116 /* WKWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WKWebView.swift; sourceTree = "<group>"; };
@@ -1643,7 +1641,6 @@
 			isa = PBXGroup;
 			children = (
 				FB55AFAB28AABD980083EFC3 /* ReaderPageView.swift */,
-				FB7F05F32DDCCF4A0036B116 /* ReaderPageDescriptionButtonView.swift */,
 				FB30958729CB3EEF00EF2B0A /* ReaderTransitionNode.swift */,
 				487484DA2A4112DD007DF0DF /* CropBordersProcessor.swift */,
 				FB7F05F72DDD6CA30036B116 /* MarkdownView.swift */,
@@ -2604,7 +2601,6 @@
 				FB1B4868277CE76B0056D02C /* MangaModels.swift in Sources */,
 				4824125A2B771E060096788C /* MangaUpdateItemView.swift in Sources */,
 				FBFDD40327838AB90055ED9F /* Sequence.swift in Sources */,
-				FB7F05F42DDCCF4A0036B116 /* ReaderPageDescriptionButtonView.swift in Sources */,
 				FB6340CE27947BCA0072A2A2 /* ExternalSourceInfo.swift in Sources */,
 				FB3F49EB2B7C6B7700D3CC75 /* ChapterFlagMask.swift in Sources */,
 				FB034E982EAAFA850072EEEB /* KavitaTracker.swift in Sources */,

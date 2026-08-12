@@ -39,8 +39,7 @@ final class ReaderWebtoonViewController: BaseObservingViewController {
     private var pageLayouts: [PageLayout] = []
     private var visibleViews: [String: UIImageView] = [:]
     private var imageTasks: [String: Task<Void, Never>] = [:]
-    private var failedImageRetryAfter: [String: Date] = [:]
-    private var imageFailureCounts: [String: Int] = [:]
+    private var failedImageKeys: Set<String> = []
     private var reusePool: [UIImageView] = []
     private var currentChapterIndex = 0
     private var previousPage = 0
@@ -206,8 +205,6 @@ private extension ReaderWebtoonViewController {
         for key in visibleViews.keys where !wantedKeys.contains(key) {
             guard let imageView = visibleViews.removeValue(forKey: key) else { continue }
             imageTasks.removeValue(forKey: key)?.cancel()
-            failedImageRetryAfter[key] = nil
-            imageFailureCounts[key] = nil
             imageView.removeFromSuperview()
             imageView.image = nil
             reusePool.append(imageView)
@@ -249,7 +246,7 @@ private extension ReaderWebtoonViewController {
 
     private func loadImage(for layout: PageLayout, into imageView: UIImageView) {
         guard imageView.image == nil, imageTasks[layout.key] == nil else { return }
-        if let retryAfter = failedImageRetryAfter[layout.key], retryAfter > Date() { return }
+        guard !failedImageKeys.contains(layout.key) else { return }
         imageTasks[layout.key] = Task { [weak self, weak imageView] in
             let image = await Self.loadImage(
                 archiveURL: layout.archiveURL,
@@ -259,28 +256,10 @@ private extension ReaderWebtoonViewController {
             self.imageTasks[layout.key] = nil
             guard self.visibleViews[layout.key] === imageView else { return }
             guard let image else {
-                let failureCount = self.imageFailureCounts[layout.key, default: 0] + 1
-                self.imageFailureCounts[layout.key] = failureCount
-                guard failureCount < 2 else { return }
-                let retryAfter = Date().addingTimeInterval(2)
-                self.failedImageRetryAfter[layout.key] = retryAfter
-                Task { [weak self, weak imageView] in
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    guard
-                        !Task.isCancelled,
-                        let self,
-                        let imageView,
-                        self.failedImageRetryAfter[layout.key] == retryAfter,
-                        self.visibleViews[layout.key] === imageView
-                    else { return }
-                    self.failedImageRetryAfter[layout.key] = nil
-                    self.loadImage(for: layout, into: imageView)
-                }
+                self.failedImageKeys.insert(layout.key)
                 return
             }
             imageView?.image = image
-            self.failedImageRetryAfter[layout.key] = nil
-            self.imageFailureCounts[layout.key] = nil
         }
     }
 
@@ -451,8 +430,7 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
         observedZoomScale = 1
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
-        failedImageRetryAfter.removeAll()
-        imageFailureCounts.removeAll()
+        failedImageKeys.removeAll()
         loadingPrevious = false
         loadingNext = false
         visibleViews.values.forEach { $0.removeFromSuperview() }

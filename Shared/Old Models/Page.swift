@@ -27,8 +27,6 @@ struct Page: Hashable {
     var zipURL: String?
 
     var context: PageContext?
-    var hasDescription: Bool = false
-    var description: String?
 
     var key: String {
         "\(chapterId)|\(index)"
@@ -61,10 +59,6 @@ extension Page {
         } else {
             .text("Invalid URL")
         }
-        return AidokuRunner.Page(
-            content: content,
-            hasDescription: hasDescription,
-            description: description
-        )
+        return AidokuRunner.Page(content: content)
     }
 }

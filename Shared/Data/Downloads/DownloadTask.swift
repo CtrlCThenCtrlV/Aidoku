@@ -246,17 +246,6 @@ extension DownloadTask {
                     LogManager.logger.error("Error writing page data: \(error)")
                 }
             }
-
-            if page.hasDescription {
-                var description = page.description
-                if description == nil {
-                    description = try? await source.getPageDescription(page: page.toNew())
-                }
-                if let description {
-                    let data = description.data(using: .utf8)
-                    try? data?.write(to: targetPath.appendingPathExtension("desc.txt"))
-                }
-            }
         }
 
         let pageInterceptor: PageInterceptorProcessor? = if source.features.processesPages {

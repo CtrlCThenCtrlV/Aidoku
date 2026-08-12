@@ -400,34 +400,26 @@ extension AidokuRunner.Page {
                     sourceId: sourceId,
                     chapterId: chapterId,
                     imageURL: url.absoluteString,
-                    context: context,
-                    hasDescription: hasDescription,
-                    description: description
+                    context: context
                 )
             case let .text(text):
                 Page(
                     sourceId: sourceId,
                     chapterId: chapterId,
-                    text: text,
-                    hasDescription: hasDescription,
-                    description: description
+                    text: text
                 )
             case let .image(image):
                 Page(
                     sourceId: sourceId,
                     chapterId: chapterId,
-                    image: image.image,
-                    hasDescription: hasDescription,
-                    description: description
+                    image: image.image
                 )
             case let .zipFile(url, filePath):
                 Page(
                     sourceId: sourceId,
                     chapterId: chapterId,
                     imageURL: filePath,
-                    zipURL: url.absoluteString,
-                    hasDescription: hasDescription,
-                    description: description
+                    zipURL: url.absoluteString
                 )
         }
     }

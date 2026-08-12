@@ -53,6 +53,13 @@ extension LocalFileManager {
         await LocalFileDataManager.shared.fetchArchiveManifest(mangaId: mangaId, chapterId: chapterId)
     }
 
+    // image entries of an archive, in reading order
+    nonisolated static func pageEntries(in archive: Archive) -> [Entry] {
+        archive
+            .filter { isArchivePage(path: $0.path) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
     // get info about a file to be imported
     func loadImportFileInfo(url: URL) -> ImportFileInfo? {
         // if the given url comes from an imported file that isn't copied, we need to do this
@@ -142,40 +149,8 @@ extension LocalFileManager {
             LogManager.logger.error("Failed to read archive: \(error)")
             return []
         }
-
-        var descriptionFiles: [Entry] = []
-        var pages = archive
-            .filter { entry in
-                if entry.path.hasSuffix("desc.txt") {
-                    descriptionFiles.append(entry)
-                    return false
-                }
-                return Self.isArchivePage(path: entry.path)
-            }
-            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        return Self.pageEntries(in: archive)
             .map { AidokuRunner.Page(content: .zipFile(url: archiveURL, filePath: $0.path)) }
-
-        for entry in descriptionFiles {
-            guard
-                let index = entry.path
-                    .lastPathComponent()
-                    .split(separator: ".", maxSplits: 1)
-                    .first
-                    .flatMap({ Int($0) }),
-                index > 0,
-                index <= pages.count
-            else { break }
-
-            do {
-                var descriptionData = Data()
-                _ = try archive.extract(entry) { descriptionData.append($0) }
-                pages[index - 1].hasDescription = true
-                pages[index - 1].description = String(data: descriptionData, encoding: .utf8)
-            } catch {
-                LogManager.logger.error("Failed to extract page description text from archive: \(error)")
-            }
-        }
-        return pages
     }
 }
 
@@ -247,13 +222,7 @@ extension LocalFileManager {
         }
 
         // find image entries (pages)
-        let pageEntries = archive
-            .filter { entry in
-                Self.isArchivePage(path: entry.path)
-            }
-            .sorted {
-                $0.path.localizedStandardCompare($1.path) == .orderedAscending
-            }
+        let pageEntries = Self.pageEntries(in: archive)
 
         guard !pageEntries.isEmpty else {
             throw LocalFileManagerError.noImagesFound

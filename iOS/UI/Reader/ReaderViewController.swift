@@ -53,26 +53,6 @@ class ReaderViewController: BaseObservingViewController {
     private let doubleSqueezeInterval: TimeInterval = 0.3
     private let longSqueezeThreshold: TimeInterval = 0.5
 
-    private lazy var descriptionButtonController: UIHostingController<ReaderPageDescriptionButtonView> = {
-        let buttonView = ReaderPageDescriptionButtonView(source: nil, pages: [])
-        let hostingController = UIHostingController(rootView: buttonView)
-        hostingController.view.backgroundColor = .clear
-        hostingController.view.alpha = 0
-        hostingController.view.isHidden = true
-        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-        return hostingController
-    }()
-    private lazy var pageDescriptionButtonBottomConstraint: NSLayoutConstraint =
-        descriptionButtonController.view.bottomAnchor.constraint(
-            equalTo: {
-                if #available(iOS 16.0, *) {
-                    view.bottomAnchor
-                } else {
-                    view.safeAreaLayoutGuide.bottomAnchor
-                }
-            }()
-        )
-
     // fake zoom gesture so that the bar toggle gesture doesn't conflict with zooming
     private lazy var fakeZoomTapGesture: UITapGestureRecognizer = {
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
@@ -160,8 +140,6 @@ class ReaderViewController: BaseObservingViewController {
             toolbarButtonItemView.customView?.transform = CGAffineTransform(translationX: 0, y: -10)
         }
 
-        add(child: descriptionButtonController)
-
         toolbarItems = [toolbarButtonItemView]
         navigationController?.toolbar.fitContentViewToToolbar()
 
@@ -181,7 +159,7 @@ class ReaderViewController: BaseObservingViewController {
         let pageController = ReaderWebtoonViewController(manga: manga)
         pageController.delegate = self
         reader = pageController
-        add(child: pageController, below: descriptionButtonController.view)
+        add(child: pageController)
 
         // set up apple pencil squeeze handler
         if #available(iOS 17.5, *) {
@@ -201,10 +179,7 @@ class ReaderViewController: BaseObservingViewController {
 
         NSLayoutConstraint.activate([
             activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-
-            descriptionButtonController.view.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            pageDescriptionButtonBottomConstraint
+            activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor)
         ])
     }
 
@@ -640,8 +615,6 @@ extension ReaderViewController: ReaderHoldingDelegate {
     private func setCurrentPages(_ pages: ClosedRange<Int>, position: Double? = nil) {
         guard let totalPages = toolbarView.totalPages else { return }
 
-        updateDescriptionButton(pages: pages)
-
         sessionLastInteraction = Date.now
         for page in pages {
             guard page >= 1 && page <= totalPages else { continue }
@@ -654,26 +627,6 @@ extension ReaderViewController: ReaderHoldingDelegate {
         toolbarView.setProgress(currentPage: page, totalPages: totalPages)
         if pages.upperBound >= totalPages {
             setCompleted()
-        }
-    }
-
-    private func updateDescriptionButton(pages: ClosedRange<Int>) {
-        let pageItems = pages.compactMap { self.pages[safe: $0 - 1]?.toNew() }
-        if pageItems.contains(where: { $0.hasDescription }) {
-            descriptionButtonController.rootView = ReaderPageDescriptionButtonView(
-                source: nil,
-                pages: pageItems
-            )
-            descriptionButtonController.view.isHidden = false
-            UIView.animate(withDuration: CATransaction.animationDuration()) {
-                self.descriptionButtonController.view.alpha = 1
-            }
-        } else {
-            UIView.animate(withDuration: CATransaction.animationDuration()) {
-                self.descriptionButtonController.view.alpha = 0
-            } completion: { _ in
-                self.descriptionButtonController.view.isHidden = true
-            }
         }
     }
 
@@ -863,8 +816,6 @@ extension ReaderViewController {
 
         navigationController.setNavigationBarHidden(hidden, animated: animated)
         navigationController.setToolbarHidden(hidden, animated: animated)
-
-        pageDescriptionButtonBottomConstraint.constant = hidden ? 30 : 0
 
         let backgroundColor = readerBackgroundColor(barsHidden: hidden)
         let animations = {

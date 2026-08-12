@@ -67,9 +67,7 @@ actor DownloadManager {
         if archiveURL.exists {
             return LocalFileManager.shared.readPages(from: archiveURL)
         } else {
-            var descriptionFiles: [URL] = []
-
-            var pages = directory.contents
+            return directory.contents
                 .sorted {
                     $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
                 }
@@ -78,9 +76,8 @@ actor DownloadManager {
                         return nil
                     }
                     if ["txt", "md"].contains(url.pathExtension.lowercased()) {
-                        // add description file to list
-                        if url.lastPathComponent.hasSuffix("desc.txt") {
-                            descriptionFiles.append(url)
+                        // page descriptions aren't supported, so skip them
+                        guard !url.lastPathComponent.hasSuffix("desc.txt") else {
                             return nil
                         }
                         // otherwise, load file as text
@@ -94,24 +91,6 @@ actor DownloadManager {
                         return nil
                     }
                 }
-
-            // load descriptions from files
-            for descriptionFile in descriptionFiles {
-                guard
-                    let index = descriptionFile
-                        .deletingPathExtension()
-                        .lastPathComponent
-                        .split(separator: ".", maxSplits: 1)
-                        .first
-                        .flatMap({ Int($0) }),
-                    index > 0,
-                    index <= pages.count
-                else { break }
-                pages[index - 1].hasDescription = true
-                pages[index - 1].description = try? String(contentsOf: descriptionFile)
-            }
-
-            return pages
         }
     }
 
