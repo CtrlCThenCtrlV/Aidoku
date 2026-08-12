@@ -389,6 +389,7 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
         guard let block = blocks[safe: currentChapterIndex] else { return }
         let maximum = max(block.range.lowerBound, block.range.upperBound - scrollView.bounds.height)
         scrollView.contentOffset.y = block.range.lowerBound + (maximum - block.range.lowerBound) * value
+        updateVisiblePages()
         let page = pageAtViewportMiddle(in: currentChapterIndex)
         delegate?.displayPage(page)
     }

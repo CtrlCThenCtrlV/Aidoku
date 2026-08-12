@@ -22,6 +22,7 @@ struct ReaderChapterListView: View {
                     Button {
                         self.chapter = chapter
                         chapterSet?(chapter)
+                        dismiss()
                     } label: {
                         HStack {
                             VStack(alignment: .leading) {
