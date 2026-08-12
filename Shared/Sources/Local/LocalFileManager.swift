@@ -21,10 +21,14 @@ actor LocalFileManager {
     private var lastScanTime = Date.distantPast
     private var scanTask: Task<Void, Never>?
 
-    static let allowedFileExtensions = Set(["cbz", "zip", "epub"])
+    static let allowedFileExtensions = Set(["cbz", "zip"])
     static let allowedImageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "heic", "avif"])
-    static let allowedTextExtensions = Set(["txt", "md"])
-    static let allowedPageExtensions = allowedImageExtensions.union(allowedTextExtensions)
+
+    nonisolated static func isArchivePage(path: String) -> Bool {
+        let hasHiddenComponent = path.split(separator: "/").contains { $0.hasPrefix(".") }
+        return !hasHiddenComponent
+            && allowedImageExtensions.contains(path.pathExtension().lowercased())
+    }
 
     private var localFolderFileDescriptor: CInt?
     private var localFolderSource: DispatchSourceFileSystemObject?
@@ -58,25 +62,6 @@ extension LocalFileManager {
             return nil
         }
 
-        if pathExtension == "epub" {
-            guard let book = EpubParser.parse(url: url), !book.chapters.isEmpty else {
-                return nil
-            }
-            // carry epub metadata through the existing ComicInfo import path
-            var comicInfo = ComicInfo()
-            comicInfo.series = book.title
-            comicInfo.summary = book.description
-            comicInfo.writer = book.author
-            return ImportFileInfo(
-                url: url,
-                previewImages: book.coverData.flatMap { PlatformImage(data: $0) }.map { [$0] } ?? [],
-                name: url.lastPathComponent,
-                pageCount: book.chapters.count,
-                fileType: .epub,
-                comicInfo: comicInfo
-            )
-        }
-
         // read zip file
         let archive: Archive
         do {
@@ -88,15 +73,7 @@ extension LocalFileManager {
         // find image entries (pages)
         let pageEntries = archive
             .filter { entry in
-                let lastPathComponent = entry.path.lastPathComponent()
-                guard !lastPathComponent.hasPrefix(".") else {
-                    return false
-                }
-                let ext = entry.path.pathExtension().lowercased()
-                if ext == "txt" {
-                    return !entry.path.hasSuffix("desc.txt")
-                }
-                return Self.allowedPageExtensions.contains(ext)
+                Self.isArchivePage(path: entry.path)
             }
             .sorted {
                 $0.path.localizedStandardCompare($1.path) == .orderedAscending
@@ -108,7 +85,6 @@ extension LocalFileManager {
 
         // extract the first three images for preview
         let previewImages = pageEntries
-            .filter { LocalFileManager.allowedImageExtensions.contains($0.path.lowercased()) }
             .prefix(3)
             .compactMap { entry -> PlatformImage? in
                 var imageData = Data()
@@ -150,91 +126,7 @@ extension LocalFileManager {
 
         let documentsDir = FileManager.default.documentDirectory
         let archiveURL = documentsDir.appendingPathComponent(cbzPath)
-        if archiveURL.pathExtension.lowercased() == "epub" {
-            return readEpubPages(from: archiveURL, chapterId: chapterId)
-        }
         return readPages(from: archiveURL)
-    }
-
-    // read the pages for an epub chapter
-    // the chapter id has the format "<epub file name>/<content file path>"
-    nonisolated func readEpubPages(from archiveURL: URL, chapterId: String) -> [AidokuRunner.Page] {
-        let prefix = archiveURL.lastPathComponent + "/"
-        let href = chapterId.hasPrefix(prefix) ? String(chapterId.dropFirst(prefix.count)) : chapterId
-        let segments = EpubParser.chapterSegments(url: archiveURL, href: href)
-        guard !segments.isEmpty else {
-            LogManager.logger.error("Failed to read epub chapter \(chapterId) from \(archiveURL.lastPathComponent)")
-            return []
-        }
-
-        let hasText = segments.contains {
-            if case .text = $0 { return true }
-            return false
-        }
-
-        if hasText {
-            // build a single markdown page with inline image references so the
-            // whole chapter stays in the text reader
-            let parts: [String] = segments.compactMap { segment in
-                switch segment {
-                    case .text(let text):
-                        return text
-                    case .image(let path):
-                        guard let cachedURL = Self.cacheEpubImage(archiveURL: archiveURL, path: path) else {
-                            return nil
-                        }
-                        return "![image](\(cachedURL.absoluteString))"
-                }
-            }
-            return [AidokuRunner.Page(content: .text(parts.joined(separator: "\n\n")))]
-        }
-
-        // image-only chapter (cover, illustration pages)
-        return segments.compactMap { segment in
-            guard case let .image(path) = segment else { return nil }
-            return AidokuRunner.Page(content: .zipFile(url: archiveURL, filePath: path))
-        }
-    }
-
-    // cache directory for extracted images of a given epub archive
-    nonisolated static func epubImageCacheDirectory(for archiveURL: URL) -> URL? {
-        guard let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        else { return nil }
-
-        // stable per-book folder name (fnv-1a hash)
-        func hash(_ string: String) -> String {
-            var hash: UInt64 = 0xcbf29ce484222325
-            for byte in string.utf8 {
-                hash = (hash ^ UInt64(byte)) &* 0x100000001b3
-            }
-            return String(hash, radix: 16)
-        }
-
-        return cachesDir
-            .appendingPathComponent("EpubImages", isDirectory: true)
-            .appendingPathComponent(hash(archiveURL.path), isDirectory: true)
-    }
-
-    // extract an image from an epub archive into the cache directory so it can
-    // be referenced with a file url from markdown text
-    nonisolated static func cacheEpubImage(archiveURL: URL, path: String) -> URL? {
-        guard let bookDir = epubImageCacheDirectory(for: archiveURL) else { return nil }
-        let fileURL = bookDir.appendingPathComponent(path.replacingOccurrences(of: "/", with: "_"))
-
-        if fileURL.exists {
-            return fileURL
-        }
-
-        bookDir.createDirectory()
-        do {
-            let archive = try Archive(url: archiveURL, accessMode: .read)
-            guard let entry = EpubParser.entry(in: archive, path: path) else { return nil }
-            _ = try archive.extract(entry, to: fileURL)
-            return fileURL
-        } catch {
-            LogManager.logger.error("Failed to extract epub image \(path): \(error)")
-            return nil
-        }
     }
 
     // read pages from an archive file
@@ -251,21 +143,11 @@ extension LocalFileManager {
 
         var pages = archive
             .filter { entry in
-                // ignore hidden files
-                let lastPathComponent = entry.path.lastPathComponent()
-                guard !lastPathComponent.hasPrefix(".") else {
+                if entry.path.hasSuffix("desc.txt") {
+                    descriptionFiles.append(entry)
                     return false
                 }
-                // ensure extension is allowed
-                let ext = entry.path.pathExtension().lowercased()
-                if ext == "txt" {
-                    if entry.path.hasSuffix("desc.txt") {
-                        descriptionFiles.append(entry)
-                        return false
-                    }
-                    return true
-                }
-                return Self.allowedPageExtensions.contains(ext)
+                return Self.isArchivePage(path: entry.path)
             }
             // sort by file name
             .sorted {
@@ -364,19 +246,6 @@ extension LocalFileManager {
             }
         }
 
-        // epub files create a chapter per spine item instead of image pages
-        if url.pathExtension.lowercased() == "epub" {
-            try await uploadEpub(
-                from: url,
-                skipUpload: skipUpload,
-                mangaId: mangaId,
-                mangaCoverImage: mangaCoverImage,
-                mangaName: mangaName,
-                mangaDescription: mangaDescription
-            )
-            return
-        }
-
         // read zip file
         let archive: Archive
         do {
@@ -389,15 +258,7 @@ extension LocalFileManager {
         // find image entries (pages)
         let pageEntries = archive
             .filter { entry in
-                let lastPathComponent = entry.path.lastPathComponent()
-                guard !lastPathComponent.hasPrefix(".") else {
-                    return false
-                }
-                let ext = entry.path.pathExtension().lowercased()
-                if ext == "txt" {
-                    return !entry.path.hasSuffix("desc.txt")
-                }
-                return Self.allowedPageExtensions.contains(ext)
+                Self.isArchivePage(path: entry.path)
             }
             .sorted {
                 $0.path.localizedStandardCompare($1.path) == .orderedAscending
@@ -556,104 +417,6 @@ extension LocalFileManager {
         )
     }
 
-    // add an epub file to the local files source, creating a chapter per spine item
-    // swiftlint:disable:next function_parameter_count
-    private func uploadEpub(
-        from url: URL,
-        skipUpload: Bool,
-        mangaId: String?,
-        mangaCoverImage: PlatformImage?,
-        mangaName: String?,
-        mangaDescription: String?
-    ) async throws(LocalFileManagerError) {
-        guard let book = EpubParser.parse(url: url) else {
-            throw LocalFileManagerError.cannotReadArchive
-        }
-        guard !book.chapters.isEmpty else {
-            throw LocalFileManagerError.noImagesFound
-        }
-
-        let resolvedMangaId = (mangaId ?? mangaName ?? book.title ?? url.deletingPathExtension().lastPathComponent).normalized
-        let mangaTitle = mangaName ?? book.title ?? resolvedMangaId
-
-        // create new folder for the manga
-        let fileManager = FileManager.default
-        let localFolder = fileManager.documentDirectory.appendingPathComponent("Local", isDirectory: true)
-        localFolder.createDirectory()
-        let mangaFolder = localFolder.appendingPathComponent(resolvedMangaId, isDirectory: true)
-        mangaFolder.createDirectory()
-
-        // copy file to Documents/Local/<mangaId>/<epubfile>
-        let destURL: URL
-        if skipUpload {
-            destURL = url
-        } else {
-            var newDestURL = mangaFolder.appendingPathComponent(url.lastPathComponent)
-            var counter = 1
-            while newDestURL.exists {
-                let name = url.lastPathComponent.removingExtension() + " (\(counter)).\(url.pathExtension)"
-                newDestURL = mangaFolder.appendingPathComponent(name)
-                counter += 1
-            }
-            destURL = newDestURL
-            do {
-                try fileManager.copyItem(at: url, to: destURL)
-            } catch {
-                throw LocalFileManagerError.fileCopyFailed
-            }
-        }
-
-        // save provided cover image, or fall back to the embedded epub cover
-        var coverURL: URL?
-        let coverImage = mangaCoverImage ?? book.coverData.flatMap { PlatformImage(data: $0) }
-        if mangaCoverImage != nil || mangaId == nil, let coverImage {
-            let newCoverURL = mangaFolder.appendingPathComponent("cover.png")
-            do {
-                if newCoverURL.exists {
-                    try fileManager.removeItem(at: newCoverURL)
-                }
-                try coverImage.pngData()?.write(to: newCoverURL)
-                coverURL = newCoverURL
-            } catch {
-                throw LocalFileManagerError.fileCopyFailed
-            }
-        }
-
-        // create the manga object in db if it doesn't exist yet
-        let hasMangaObject = if let mangaId {
-            await LocalFileDataManager.shared.hasSeries(id: mangaId)
-        } else {
-            false
-        }
-        if !hasMangaObject {
-            // carry epub metadata (author) through the ComicInfo path
-            var comicInfo = ComicInfo()
-            comicInfo.writer = book.author
-            await LocalFileDataManager.shared.createManga(
-                url: mangaFolder,
-                id: resolvedMangaId,
-                title: mangaTitle,
-                cover: coverURL?.toAidokuImageUrl()?.absoluteString,
-                description: mangaDescription ?? book.description,
-                // books read left to right, unlike the rtl manga default
-                viewer: .leftToRight,
-                comicInfo: comicInfo
-            )
-        }
-
-        // create a chapter for each spine item
-        // the chapter id encodes the content file path so pages can be fetched later
-        let fileName = destURL.lastPathComponent
-        for (index, chapter) in book.chapters.enumerated() {
-            await LocalFileDataManager.shared.createChapter(
-                mangaId: resolvedMangaId,
-                url: destURL,
-                id: "\(fileName)/\(chapter.href)",
-                title: chapter.title,
-                chapter: Float(index + 1)
-            )
-        }
-    }
 }
 
 extension LocalFileManager {
@@ -707,7 +470,6 @@ extension LocalFileManager {
         if fileURL.exists {
             try? FileManager.default.removeItem(at: fileURL)
         }
-        Self.removeEpubImageCache(for: fileURL)
     }
 
     // remove a chapter from a given local manga
@@ -725,21 +487,12 @@ extension LocalFileManager {
             if fileURL.exists {
                 try? FileManager.default.removeItem(at: fileURL)
             }
-            Self.removeEpubImageCache(for: fileURL)
         }
 
         // remove the manga entry once no chapters remain
         if await LocalFileDataManager.shared.fetchChapters(mangaId: mangaId).isEmpty {
             await removeManga(with: mangaId)
         }
-    }
-
-    // remove cached extracted images for a given epub archive
-    nonisolated static func removeEpubImageCache(for archiveURL: URL) {
-        guard archiveURL.pathExtension.lowercased() == "epub",
-              let bookDir = epubImageCacheDirectory(for: archiveURL)
-        else { return }
-        try? FileManager.default.removeItem(at: bookDir)
     }
 
     // remove all local source files and db objects
@@ -754,11 +507,6 @@ extension LocalFileManager {
             try fileManager.removeItem(at: localFolder)
         } catch {
             LogManager.logger.error("Failed to remove Local folder: \(error)")
-        }
-
-        // clear extracted epub images
-        if let cachesDir = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            try? fileManager.removeItem(at: cachesDir.appendingPathComponent("EpubImages", isDirectory: true))
         }
 
         // update database

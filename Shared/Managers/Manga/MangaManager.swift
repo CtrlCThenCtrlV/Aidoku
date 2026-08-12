@@ -787,14 +787,6 @@ extension MangaManager {
         to newManga: AidokuRunner.Manga,
         withChapters newChapters: [AidokuRunner.Chapter],
     ) async -> (AidokuRunner.Manga, AidokuRunner.Manga)? {
-        // migrate settings
-        if let readingMode = UserDefaults.standard.string(forKey: "Reader.readingMode.\(oldManga.identifier)") {
-            UserDefaults.standard.set(readingMode, forKey: "Reader.readingMode.\(newManga.identifier)")
-            if !copy {
-                UserDefaults.standard.removeObject(forKey: "Reader.readingMode.\(oldManga.identifier)")
-            }
-        }
-
         // add new item to library if copying
         if copy {
             let inLibrary = await CoreDataManager.shared.container.performBackgroundTask { @Sendable context in

@@ -149,7 +149,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
                 "History.lockHistoryTab": false,
 
-                "Reader.readingMode": "webtoon",
                 "Reader.skipDuplicateChapters": true,
                 "Reader.markDuplicateChapters": true,
                 "Reader.downsampleImages": false,
@@ -164,23 +163,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 "Reader.invertTapZones": false,
                 "Reader.animatePageTransitions": true,
                 "Reader.backgroundColor": "black",
-                "Reader.pagesToPreload": 2,
-                "Reader.pagedPageLayout": "auto",
-                "Reader.pagedPageOffset": false,
-                "Reader.splitWideImages": false,
-                "Reader.reverseSplitOrder": false,
                 "Reader.verticalInfiniteScroll": true,
                 "Reader.pillarbox": false,
                 "Reader.pillarboxAmount": 15,
                 "Reader.pillarboxOrientation": "both",
                 "Reader.orientation": "portrait",
-
-                // Text Reader defaults
-                "Reader.textReaderStyle": "scroll",
-                "Reader.textFontFamily": "System",
-                "Reader.textFontSize": 18,
-                "Reader.textLineSpacing": 8,
-                "Reader.textHorizontalPadding": 24,
 
                 "Tracking.updateAfterReading": true,
                 "Tracking.autoSyncFromTracker": false,

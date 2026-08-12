@@ -6,23 +6,13 @@
 //
 
 import UIKit
-import SafariServices
 import SwiftUI
 import AidokuRunner
 
 class ReaderViewController: BaseObservingViewController {
-    enum Reader {
-        case paged
-        case scroll
-        case text
-    }
-
-    let source: AidokuRunner.Source?
     let manga: AidokuRunner.Manga
     var chapter: AidokuRunner.Chapter
     var pages: [Page] = []
-    var readingMode: ReadingMode = .rtl
-    var defaultReadingMode: ReadingMode?
     private var tapZone: TapZone?
 
     private var chapterList: [AidokuRunner.Chapter]
@@ -64,7 +54,7 @@ class ReaderViewController: BaseObservingViewController {
     private let longSqueezeThreshold: TimeInterval = 0.5
 
     private lazy var descriptionButtonController: UIHostingController<ReaderPageDescriptionButtonView> = {
-        let buttonView = ReaderPageDescriptionButtonView(source: source, pages: [])
+        let buttonView = ReaderPageDescriptionButtonView(source: nil, pages: [])
         let hostingController = UIHostingController(rootView: buttonView)
         hostingController.view.backgroundColor = .clear
         hostingController.view.alpha = 0
@@ -110,22 +100,14 @@ class ReaderViewController: BaseObservingViewController {
     }
 
     init(
-        source: AidokuRunner.Source?,
         manga: AidokuRunner.Manga,
         chapter: AidokuRunner.Chapter
     ) {
-        self.source = source
+        precondition(manga.sourceKey == LocalSourceRunner.sourceKey, "Archive reader only accepts local manga")
         self.manga = manga
         self.chapter = chapter
         self.chapterList = manga.chapters ?? []
         self.chaptersToMark = [chapter]
-        self.defaultReadingMode = switch manga.viewer {
-            case .rightToLeft: .rtl
-            case .leftToRight: .ltr
-            case .vertical: .vertical
-            case .webtoon: .webtoon
-            case .unknown: .none
-        }
         super.init()
         hidesBottomBarWhenPushed = true
     }
@@ -194,16 +176,12 @@ class ReaderViewController: BaseObservingViewController {
         view.addGestureRecognizer(fakeZoomTapGesture)
         view.addGestureRecognizer(barToggleTapGesture)
 
-        // page offset tap gesture
-        let pageOffsetGesture = UITapGestureRecognizer(target: self, action: #selector(toggleOffset))
-        pageOffsetGesture.numberOfTouchesRequired = 2
-        pageOffsetGesture.numberOfTapsRequired = 2
-        view.addGestureRecognizer(pageOffsetGesture)
-
-        // set reader
-        let readingModeKey = "Reader.readingMode.\(manga.identifier)"
-        UserDefaults.standard.register(defaults: [readingModeKey: "default"])
-        setReadingMode(UserDefaults.standard.string(forKey: readingModeKey))
+        // The archive reader has a single rendering path: continuous Webtoon.
+        toolbarView.sliderView.direction = .forward
+        let pageController = ReaderWebtoonViewController(manga: manga)
+        pageController.delegate = self
+        reader = pageController
+        add(child: pageController, below: descriptionButtonController.view)
 
         // set up apple pencil squeeze handler
         if #available(iOS 17.5, *) {
@@ -231,13 +209,6 @@ class ReaderViewController: BaseObservingViewController {
     }
 
     override func observe() {
-        addObserver(forName: "Reader.readingMode.\(manga.identifier)") { [weak self] _ in
-            guard let self else { return }
-            self.setReadingMode(UserDefaults.standard.string(forKey: "Reader.readingMode.\(self.manga.identifier)"))
-            self.reader?.setChapter(self.chapter, startPage: self.currentPage)
-            // if the tap zone is auto, it will changed based on the current reader
-            self.updateTapZone()
-        }
         addObserver(forName: "Reader.disableDoubleTap") { [weak self] notification in
             self?.fakeZoomTapGesture.isEnabled = !(notification.object as? Bool ?? UserDefaults.standard.bool(forKey: "Reader.disableDoubleTap"))
         }
@@ -251,22 +222,6 @@ class ReaderViewController: BaseObservingViewController {
         addObserver(forName: "Reader.cropBorders", using: reloadBlock)
         addObserver(forName: "Reader.liveText", using: reloadBlock)
         addObserver(forName: "Reader.tapZones", using: reloadBlock)
-        // Switch text reader style (paged <-> scroll) without restart
-        addObserver(forName: "Reader.textReaderStyle") { [weak self] _ in
-            guard let self else { return }
-            // Only switch if we're currently in a text reader
-            if self.reader is ReaderTextViewController || self.reader is ReaderPagedTextViewController {
-                // Save current position before switching so the new reader can restore it
-                Task {
-                    await self.updateReadPosition()
-                    await MainActor.run {
-                        self.setReader(.text)
-                        self.reader?.setChapter(self.chapter, startPage: self.currentPage)
-                        self.updateTapZone()
-                    }
-                }
-            }
-        }
         addObserver(forName: UIScene.willDeactivateNotification) { [weak self] _ in
             guard let self else { return }
             Task {
@@ -460,12 +415,7 @@ class ReaderViewController: BaseObservingViewController {
     }
 
     func loadChapterList() async {
-        let updatedManga = try? await source?.getMangaUpdate(
-            manga: manga,
-            needsDetails: false,
-            needsChapters: true
-        )
-        chapterList = updatedManga?.chapters ?? []
+        chapterList = await LocalFileDataManager.shared.fetchChapters(mangaId: manga.key)
     }
 
     func loadCurrentChapter() {
@@ -476,7 +426,7 @@ class ReaderViewController: BaseObservingViewController {
         }
 
         let (completed, startPage) = CoreDataManager.shared.getProgress(
-            sourceId: source?.key ?? manga.sourceKey,
+            sourceId: LocalSourceRunner.sourceKey,
             mangaId: manga.key,
             chapterId: chapter.key
         )
@@ -519,26 +469,10 @@ class ReaderViewController: BaseObservingViewController {
     }
 
     @objc func openReaderSettings() {
-        let currentReader: Reader
-        switch reader {
-            case is ReaderTextViewController, is ReaderPagedTextViewController:
-                currentReader = .text
-            case is ReaderPagedViewController:
-                currentReader = .paged
-            case is ReaderWebtoonViewController:
-                currentReader = .scroll
-            default:
-                currentReader = .paged
-        }
         let vc = UIHostingController(
-            rootView: ReaderSettingsView(mangaId: manga.identifier, reader: currentReader)
+            rootView: ReaderSettingsView()
         )
         present(vc, animated: true)
-    }
-
-    @objc func openWebView() {
-        guard let url = chapter.url, url.scheme == "http" || url.scheme == "https" else { return }
-        present(SFSafariViewController(url: url), animated: true)
     }
 
     @objc func openChapterList() {
@@ -566,111 +500,6 @@ class ReaderViewController: BaseObservingViewController {
     }
     @objc func sliderStopped(_ sender: ReaderSliderView) {
         reader?.sliderStopped(value: sender.currentValue)
-    }
-}
-
-// MARK: - Reading Mode
-extension ReaderViewController {
-    func setReadingMode(_ mode: String?) {
-        switch mode {
-            case "rtl": readingMode = .rtl
-            case "ltr": readingMode = .ltr
-            case "vertical": readingMode = .vertical
-            case "scroll", "webtoon": readingMode = .webtoon
-            case "continuous": readingMode = .continuous
-            case "default":
-                let defaultMode = UserDefaults.standard.string(forKey: "Reader.readingMode")
-                if defaultMode == "default" {
-                    setReadingMode("auto")
-                } else {
-                    setReadingMode(defaultMode)
-                }
-                return
-            default: // auto
-                // use given default reading mode
-                if let defaultReadingMode {
-                    readingMode = defaultReadingMode
-                } else if CoreDataManager.shared.hasManga(
-                    sourceId: source?.key ?? manga.sourceKey,
-                    mangaId: manga.key
-                ) {
-                    // fall back to stored manga viewer
-                    let sourceMode = CoreDataManager.shared.getMangaSourceReadingMode(
-                        sourceId: source?.key ?? manga.sourceKey,
-                        mangaId: manga.key
-                    )
-                    if let mode = ReadingMode(rawValue: sourceMode) {
-                        readingMode = mode
-                    } else {
-                        readingMode = .rtl
-                    }
-                } else {
-                    // fall back to rtl reading mode
-                    readingMode = .rtl
-                }
-        }
-
-        if !(reader is ReaderTextViewController) {
-            switch readingMode {
-                case .ltr, .rtl, .vertical:
-                    setReader(.paged)
-                case .webtoon, .continuous:
-                    setReader(.scroll)
-            }
-        }
-    }
-
-    func setReader(_ type: Reader) {
-        let pageController: ReaderReaderDelegate?
-        switch type {
-            case .paged:
-                if readingMode == .rtl {
-                    toolbarView.sliderView.direction = .backward
-                } else {
-                    toolbarView.sliderView.direction = .forward
-                }
-                if !(reader is ReaderPagedViewController) {
-                    pageController = ReaderPagedViewController(source: source, manga: manga)
-                } else {
-                    pageController = nil
-                }
-            case .scroll:
-                toolbarView.sliderView.direction = .forward
-                if !(reader is ReaderWebtoonViewController) {
-                    pageController = ReaderWebtoonViewController(source: source, manga: manga)
-                } else {
-                    pageController = nil
-                }
-            case .text:
-                // Text always reads left-to-right, regardless of manga setting
-                toolbarView.sliderView.direction = .forward
-
-                // Check user preference for text reader style
-                let textReaderStyle = UserDefaults.standard.string(forKey: "Reader.textReaderStyle") ?? "paged"
-                if textReaderStyle == "paged" {
-                    // Kindle-like paginated experience
-                    if !(reader is ReaderPagedTextViewController) {
-                        pageController = ReaderPagedTextViewController(source: source, manga: manga)
-                    } else {
-                        pageController = nil
-                    }
-                } else {
-                    // Original scroll-based text reader
-                    if !(reader is ReaderTextViewController) {
-                        pageController = ReaderTextViewController(source: source, manga: manga)
-                    } else {
-                        pageController = nil
-                    }
-                }
-        }
-        if let pageController {
-            reader?.remove()
-            pageController.delegate = self
-            reader = pageController
-            add(child: pageController, below: descriptionButtonController.view)
-        }
-        reader?.readingMode = readingMode
-        disableSwipeGestures()
     }
 }
 
@@ -824,14 +653,7 @@ extension ReaderViewController: ReaderHoldingDelegate {
         currentPosition = position
         toolbarView.currentPage = page
         toolbarView.updateSliderPosition()
-        // Mark as completed when reaching the last page
-        // Exception: Don't mark for the pre-pagination placeholder (single text page before
-        // ReaderPagedTextViewController has paginated it). Once paginated, even single-page
-        // chapters should be marked as read.
-        let isPrePaginationPlaceholder = totalPages == 1
-            && self.pages.first?.isTextPage == true
-            && !(reader is ReaderPagedTextViewController && (reader as? ReaderPagedTextViewController)?.hasPaginated == true)
-        if pages.upperBound >= totalPages && !isPrePaginationPlaceholder {
+        if pages.upperBound >= totalPages {
             setCompleted()
         }
     }
@@ -840,7 +662,7 @@ extension ReaderViewController: ReaderHoldingDelegate {
         let pageItems = pages.compactMap { self.pages[safe: $0 - 1]?.toNew() }
         if pageItems.contains(where: { $0.hasDescription }) {
             descriptionButtonController.rootView = ReaderPageDescriptionButtonView(
-                source: source,
+                source: nil,
                 pages: pageItems
             )
             descriptionButtonController.view.isHidden = false
@@ -857,45 +679,11 @@ extension ReaderViewController: ReaderHoldingDelegate {
     }
 
     func setPages(_ pages: [Page]) {
-
-        // If already in a text reader with text pages, just update toolbar - don't trigger any switches
-        if (reader is ReaderPagedTextViewController || reader is ReaderTextViewController)
-            && pages.allSatisfy({ $0.isTextPage }) && pages.count > 1 {
-            self.pages = pages
-            toolbarView.totalPages = pages.count
-            activityIndicator.stopAnimating()
-            return
-        }
         self.pages = pages
         toolbarView.totalPages = pages.count
         activityIndicator.stopAnimating()
         if pages.isEmpty {
-            // no pages, show error
             showLoadFailAlert()
-        } else if pages.count == 1 && pages[0].isTextPage {
-            // single text page, should switch to text reader
-            if !(reader is ReaderPagedTextViewController) && !(reader is ReaderTextViewController) {
-                setReader(.text)
-                setChapter(chapter)
-                loadCurrentChapter()
-            } else {
-            }
-        } else if reader is ReaderPagedTextViewController && pages.allSatisfy({ $0.isTextPage }) {
-            // Already in paginated text reader with multiple text pages (from pagination)
-            // Don't switch away - this is our internal page count update
-            // Just update the toolbar, don't reload
-        } else {
-            // otherwise, make sure we're not in the text reader
-            if reader is ReaderTextViewController || reader is ReaderPagedTextViewController {
-                switch readingMode {
-                    case .ltr, .rtl, .vertical:
-                        setReader(.paged)
-                    case .webtoon, .continuous:
-                        setReader(.scroll)
-                }
-                setChapter(chapter)
-                loadCurrentChapter()
-            }
         }
     }
 
@@ -928,13 +716,7 @@ extension ReaderViewController {
     func updateTapZone() {
         let enabledTapZone = UserDefaults.standard.string(forKey: "Reader.tapZones")
         let tapZone: TapZone? = switch enabledTapZone {
-            case "auto": switch reader {
-                case is ReaderPagedViewController: .leftRight
-                case is ReaderWebtoonViewController: .lShaped
-                case is ReaderTextViewController: .lShaped
-                case is ReaderPagedTextViewController: .leftRight  // Kindle-style tap zones
-                default: .leftRight
-            }
+            case "auto": .lShaped
             case "left-right": .leftRight
             case "l-shaped": .lShaped
             case "kindle": .kindle
@@ -1040,17 +822,11 @@ extension ReaderViewController: UIPencilInteractionDelegate {
     }
 
     private func nextPage() {
-        switch readingMode {
-            case .rtl: reader?.moveLeft()
-            default: reader?.moveRight()
-        }
+        reader?.moveRight()
     }
 
     private func previousPage() {
-        switch readingMode {
-            case .rtl: reader?.moveRight()
-            default: reader?.moveLeft()
-        }
+        reader?.moveLeft()
     }
 }
 
@@ -1130,11 +906,6 @@ extension ReaderViewController {
                 input: UIKeyCommand.inputRightArrow
             ),
             UIKeyCommand(
-                title: NSLocalizedString("TOGGLE_PAGE_OFFSET"),
-                action: #selector(toggleOffset),
-                input: "o"
-            ),
-            UIKeyCommand(
                 title: NSLocalizedString("CHAPTER_FORWARD"),
                 action: #selector(nextChapter),
                 input: ","
@@ -1170,10 +941,6 @@ extension ReaderViewController {
 
     @objc func moveRight() {
         reader?.moveRight()
-    }
-
-    @objc func toggleOffset() {
-        reader?.toggleOffset()
     }
 
     @objc func nextChapter() {

@@ -83,9 +83,9 @@ struct DownloadedMangaView: View {
         .onChange(of: openChapter) { chapter in
             guard let chapter else { return }
             openChapter = nil
+            guard viewModel.manga.sourceId == LocalSourceRunner.sourceKey else { return }
             path.navigationController?.pushReader(
                 ReaderViewController(
-                    source: SourceManager.shared.source(for: viewModel.manga.sourceId),
                     manga: viewModel.manga.toManga(),
                     chapter: chapter.toChapter()
                 )

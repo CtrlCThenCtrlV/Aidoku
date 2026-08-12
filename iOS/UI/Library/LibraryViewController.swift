@@ -1343,11 +1343,8 @@ extension LibraryViewController {
                     sortAscending: sortAscending
                 )
 
-                if let chapter = nextChapter {
+                if let chapter = nextChapter, info.sourceId == LocalSourceRunner.sourceKey {
                     // open reader view
-                    guard let source = SourceManager.shared.source(for: info.sourceId) else {
-                        return
-                    }
                     let manga = AidokuRunner.Manga(
                         sourceKey: info.sourceId,
                         key: info.mangaId,
@@ -1355,7 +1352,6 @@ extension LibraryViewController {
                         chapters: sortedChapters
                     )
                     let readerController = ReaderViewController(
-                        source: source,
                         manga: manga,
                         chapter: chapter
                     )

@@ -9,7 +9,7 @@ import AidokuRunner
 import Foundation
 
 @MainActor
-class ReaderWebtoonViewModel: ReaderPagedViewModel {
+class ReaderWebtoonViewModel: ArchiveReaderViewModel {
     func setPages(chapter: AidokuRunner.Chapter, pages: [Page]) {
         self.chapter = chapter
         self.pages = pages

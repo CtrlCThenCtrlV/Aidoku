@@ -9,14 +9,6 @@ import AidokuRunner
 import UIKit
 
 enum Settings {
-    // All available font families on the system
-    private static let availableFonts: [String] = {
-        var fonts = UIFont.familyNames.sorted()
-        // Add "System" at the beginning for the default SF font
-        fonts.insert("System", at: 0)
-        return fonts
-    }()
-
     static let settings: [Setting] = [
         .init(value: .group(.init(items: [
             .init(
@@ -328,30 +320,6 @@ extension Settings {
     private static let readerSettings: [Setting] = [
         .init(value: .group(.init(items: [
             .init(
-                key: "Reader.readingMode",
-                title: NSLocalizedString("READING_MODE"),
-                value: .select(.init(
-                    values: [
-                        "default",
-                        "auto",
-                        "rtl",
-                        "ltr",
-                        "vertical",
-                        "webtoon",
-                        "continuous"
-                    ],
-                    titles: [
-                        NSLocalizedString("DEFAULT"),
-                        NSLocalizedString("AUTOMATIC"),
-                        NSLocalizedString("RTL"),
-                        NSLocalizedString("LTR"),
-                        NSLocalizedString("VERTICAL"),
-                        NSLocalizedString("WEBTOON"),
-                        NSLocalizedString("CONTINUOUS_WITH_GAPS")
-                    ]
-                ))
-            ),
-            .init(
                 key: "Reader.skipDuplicateChapters",
                 title: NSLocalizedString("SKIP_DUPLICATE_CHAPTERS"),
                 value: .toggle(.init())
@@ -479,47 +447,6 @@ extension Settings {
             ))
         ),
         .init(
-            title: NSLocalizedString("PAGED"),
-            value: .group(.init(items: [
-                .init(
-                    key: "Reader.pagesToPreload",
-                    title: NSLocalizedString("PAGES_TO_PRELOAD"),
-                    value: .stepper(.init(minimumValue: 1, maximumValue: 10))
-                ),
-                .init(
-                    key: "Reader.pagedPageLayout",
-                    title: NSLocalizedString("PAGE_LAYOUT"),
-                    value: .select(.init(
-                        values: ["single", "double", "auto"],
-                        titles: [
-                            NSLocalizedString("SINGLE_PAGE"),
-                            NSLocalizedString("DOUBLE_PAGE"),
-                            NSLocalizedString("AUTOMATIC")
-                        ]
-                    ))
-                ),
-                .init(
-                    key: "Reader.pagedPageOffset",
-                    title: NSLocalizedString("PAGE_OFFSET"),
-                    notification: .init("Reader.pagedPageOffset"),
-                    value: .toggle(.init())
-                ),
-                .init(
-                    key: "Reader.splitWideImages",
-                    title: NSLocalizedString("SPLIT_WIDE_IMAGES"),
-                    notification: .init("Reader.splitWideImages"),
-                    value: .toggle(.init())
-                ),
-                .init(
-                    key: "Reader.reverseSplitOrder",
-                    title: NSLocalizedString("REVERSE_SPLIT_ORDER"),
-                    notification: .init("Reader.reverseSplitOrder"),
-                    requires: "Reader.splitWideImages",
-                    value: .toggle(.init())
-                )
-            ]))
-        ),
-        .init(
             title: NSLocalizedString("WEBTOON"),
             value: .group(.init(
                 footer: NSLocalizedString("PILLARBOX_ORIENTATION_INFO"),
@@ -552,50 +479,6 @@ extension Settings {
                                 NSLocalizedString("LANDSCAPE")
                             ]
                         ))
-                    )
-                ]
-            ))
-        ),
-        .init(
-            title: String(format: NSLocalizedString("%@_EXPERIMENTAL"), NSLocalizedString("TEXT_READER")),
-            value: .group(.init(
-                items: [
-                    .init(
-                        key: "Reader.textReaderStyle",
-                        title: NSLocalizedString("TEXT_READER_STYLE"),
-                        value: .select(.init(
-                            values: ["paged", "scroll"],
-                            titles: [
-                                NSLocalizedString("TEXT_READER_PAGED"),
-                                NSLocalizedString("TEXT_READER_SCROLL")
-                            ]
-                        ))
-                    ),
-                    .init(
-                        key: "Reader.textFontFamily",
-                        title: NSLocalizedString("TEXT_FONT_FAMILY"),
-                        notification: .init("Reader.textFontFamily"),
-                        value: .select(.init(
-                            values: Self.availableFonts
-                        ))
-                    ),
-                    .init(
-                        key: "Reader.textFontSize",
-                        title: NSLocalizedString("TEXT_FONT_SIZE"),
-                        notification: .init("Reader.textFontSize"),
-                        value: .stepper(.init(minimumValue: 12, maximumValue: 32, stepValue: 2))
-                    ),
-                    .init(
-                        key: "Reader.textLineSpacing",
-                        title: NSLocalizedString("TEXT_LINE_SPACING"),
-                        notification: .init("Reader.textLineSpacing"),
-                        value: .stepper(.init(minimumValue: 0, maximumValue: 24, stepValue: 2))
-                    ),
-                    .init(
-                        key: "Reader.textHorizontalPadding",
-                        title: NSLocalizedString("TEXT_HORIZONTAL_PADDING"),
-                        notification: .init("Reader.textHorizontalPadding"),
-                        value: .stepper(.init(minimumValue: 8, maximumValue: 48, stepValue: 4))
                     )
                 ]
             ))

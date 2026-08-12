@@ -1,5 +1,5 @@
 //
-//  ReaderPagedViewModel.swift
+//  ArchiveReaderViewModel.swift
 //  Aidoku (iOS)
 //
 //  Created by Skitty on 8/15/22.
@@ -9,8 +9,7 @@ import Foundation
 import AidokuRunner
 
 @MainActor
-class ReaderPagedViewModel {
-    let source: AidokuRunner.Source?
+class ArchiveReaderViewModel {
     let manga: AidokuRunner.Manga
     var chapter: AidokuRunner.Chapter?
     var pages: [Page] = []
@@ -18,8 +17,7 @@ class ReaderPagedViewModel {
     var preloadedChapter: AidokuRunner.Chapter?
     var preloadedPages: [Page] = []
 
-    init(source: AidokuRunner.Source?, manga: AidokuRunner.Manga) {
-        self.source = source
+    init(manga: AidokuRunner.Manga) {
         self.manga = manga
     }
 
@@ -46,28 +44,8 @@ class ReaderPagedViewModel {
     }
 
     private func getPages(chapter: AidokuRunner.Chapter) async -> [Page] {
-        let sourceId = source?.key ?? manga.sourceKey
-        let identifier = ChapterIdentifier(
-            sourceKey: sourceId,
-            mangaKey: manga.key,
-            chapterKey: chapter.key
-        )
-        let isDownloaded = DownloadManager.shared.isChapterDownloaded(chapter: identifier)
-        if isDownloaded {
-            return await DownloadManager.shared.getDownloadedPages(for: identifier)
-                .map {
-                    $0.toOld(sourceId: sourceId, chapterId: chapter.key)
-                }
-        } else {
-            return (try? await source?
-                .getPageList(
-                    manga: manga,
-                    chapter: chapter
-                )
-            )?
-                .map {
-                    $0.toOld(sourceId: sourceId, chapterId: chapter.key)
-                } ?? []
-        }
+        guard manga.sourceKey == LocalSourceRunner.sourceKey else { return [] }
+        return await LocalFileManager.shared.fetchPages(mangaId: manga.key, chapterId: chapter.key)
+            .map { $0.toOld(sourceId: LocalSourceRunner.sourceKey, chapterId: chapter.key) }
     }
 }

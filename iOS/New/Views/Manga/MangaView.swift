@@ -232,6 +232,7 @@ struct MangaView: View {
             .onChange(of: openChapter) { chapter in
                 guard let chapter else { return }
                 openChapter = nil
+                guard viewModel.manga.sourceKey == LocalSourceRunner.sourceKey else { return }
                 var mangaWithFilteredChapters = viewModel.manga
                 mangaWithFilteredChapters.chapters = if viewModel.chapterSortAscending {
                     viewModel.chapters.reversed()
@@ -240,7 +241,6 @@ struct MangaView: View {
                 }
                 path.navigationController?.pushReader(
                     ReaderViewController(
-                        source: viewModel.source,
                         manga: mangaWithFilteredChapters,
                         chapter: chapter
                     )

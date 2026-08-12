@@ -16,14 +16,6 @@ class ReaderWebtoonViewController: ZoomableCollectionViewController {
     weak var delegate: ReaderHoldingDelegate?
 
     var chapter: AidokuRunner.Chapter?
-    var readingMode: ReadingMode = .webtoon {
-        didSet {
-            let layout = collectionNode.collectionViewLayout as? VerticalContentOffsetPreservingLayout
-            layout?.spacing = readingMode == .webtoon ? 0 : 15
-            collectionNode.invalidateCalculatedLayout()
-        }
-    }
-
 //    private let prefetcher = ImagePrefetcher()
 
     // Indicates if infinite scroll is enabled
@@ -48,9 +40,11 @@ class ReaderWebtoonViewController: ZoomableCollectionViewController {
     // Stores the last calculated page number
     private var previousPage = 0
 
-    init(source: AidokuRunner.Source?, manga: AidokuRunner.Manga) {
-        self.viewModel = ReaderWebtoonViewModel(source: source, manga: manga)
-        super.init(layout: VerticalContentOffsetPreservingLayout())
+    init(manga: AidokuRunner.Manga) {
+        self.viewModel = ReaderWebtoonViewModel(manga: manga)
+        let layout = VerticalContentOffsetPreservingLayout()
+        layout.spacing = 0
+        super.init(layout: layout)
     }
 
     override func configure() {
@@ -404,7 +398,7 @@ extension ReaderWebtoonViewController {
         pages.insert(
             [Page(
                 type: .prevInfoPage,
-                sourceId: viewModel.source?.key ?? viewModel.manga.sourceKey,
+                sourceId: LocalSourceRunner.sourceKey,
                 chapterId: prevChapter.key,
                 index: -1
             )]  + viewModel.preloadedPages,
@@ -456,7 +450,7 @@ extension ReaderWebtoonViewController {
         chapters.append(nextChapter)
         pages.append(viewModel.preloadedPages + [Page(
             type: .nextInfoPage,
-            sourceId: viewModel.source?.key ?? viewModel.manga.sourceKey,
+            sourceId: LocalSourceRunner.sourceKey,
             chapterId: nextChapter.id,
             index: -2
         )])
@@ -615,7 +609,7 @@ extension ReaderWebtoonViewController: ReaderReaderDelegate {
                 await collectionNode.reloadData()
                 return
             }
-            let sourceId = viewModel.source?.key ?? viewModel.manga.sourceKey
+            let sourceId = LocalSourceRunner.sourceKey
             pages = [[
                 Page(
                     type: .prevInfoPage,
@@ -690,7 +684,7 @@ extension ReaderWebtoonViewController: ASCollectionDataSource {
             // image page
             return { [weak self] in
                 guard let self else { return ASCellNode() }
-                let cell = ReaderWebtoonPageNode(source: self.viewModel.source, page: page)
+                let cell = ReaderWebtoonPageNode(source: nil, page: page)
                 cell.delegate = self
                 return cell
             }
@@ -714,11 +708,11 @@ extension ReaderWebtoonViewController: ASCollectionDataSource {
                 return ReaderWebtoonTransitionNode(transition: .init(
                     type: page.type == .prevInfoPage ? .prev : .next,
                     from: chapter.toOld(
-                        sourceId: self.viewModel.source?.key ?? self.viewModel.manga.sourceKey,
+                        sourceId: LocalSourceRunner.sourceKey,
                         mangaId: self.viewModel.manga.key
                     ),
                     to: to?.toOld(
-                        sourceId: self.viewModel.source?.key ?? self.viewModel.manga.sourceKey,
+                        sourceId: LocalSourceRunner.sourceKey,
                         mangaId: self.viewModel.manga.key
                     )
                 ))
